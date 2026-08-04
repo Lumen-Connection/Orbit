@@ -30,15 +30,15 @@ language models through a single, clean, and extremely lightweight interface.
 | :--- | :--- |
 | **OpenAI** | GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna |
 | **Google** | Gemini 3.1 Pro, Gemini 3.6 Flash, Gemini 3.5 Flash-Lite |
-| **Anthropic** | Claude Fable 5, Claude Opus 4.8, Claude Sonnet 5 |
-| **xAI** | Grok 4.5, Grok 4.3, Grok Build 0.1 |
-| **Alibaba** | Qwen3.7-Max, Qwen3.7-Plus, Qwen3.6-Flash |
+| **Anthropic** | Claude Fable 5, Claude Opus 5, Claude Sonnet 5 |
+| **SpaceXAI** | Grok 4.5, Grok 4.3, Grok Build 0.1 |
+| **Alibaba** | Qwen3.8-Max, Qwen3.7-Plus, Qwen3.6-Flash |
 | **DeepSeek** | DeepSeek V4 Pro, DeepSeek V4 Flash, DeepSeek V3.2 |
 | **Z.ai** | GLM-5.2, GLM-5.1, GLM-5V-Turbo |
 | **MoonshotAI** | Kimi K3, Kimi K2.7 Code, Kimi K2.6 |
 | **MiniMax** | MiniMax-M3, MiniMax-M2.7, MiniMax-M2-her |
 | **Xiaomi** | MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash |
-| **Coding-focused** | GPT-5.6 Sol Pro, GPT-5.3 Codex, KAT-Coder-Pro V2.5 |
+| **Coding-focused** | GPT-5.6 Sol Pro, Claude Opus 4.8, KAT-Coder-Pro V2.5 |
 
 ## Requirements
 

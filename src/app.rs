@@ -70,8 +70,8 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Extreme cost Mythos-level reasoning model"
             },
             ModelEntry {
-                id: "anthropic/claude-opus-4.8",
-                name: "Claude Opus 4.8",
+                id: "anthropic/claude-opus-5",
+                name: "Claude Opus 5",
                 descriptor: "State-of-the-art reasoning model"
             },
             ModelEntry {
@@ -82,7 +82,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         ],
     },
     ModelGroup {
-        provider: "xAI",
+        provider: "SpaceXAI",
         models: &[
             ModelEntry {
                 id: "x-ai/grok-4.5",
@@ -105,8 +105,8 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "Alibaba",
         models: &[
             ModelEntry {
-                id: "qwen/qwen3.7-max",
-                name: "Qwen3.7-Max",
+                id: "qwen/qwen3.8-max",
+                name: "Qwen3.8-Max",
                 descriptor: "Extreme thinking model",
             },
             ModelEntry {
@@ -115,8 +115,8 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Adaptive reasoning model",
             },
             ModelEntry {
-                id: "qwen/qwen3.6-flash",
-                name: "Qwen3.6-Flash",
+                id: "qwen/qwen3.7-flash",
+                name: "Qwen3.7-Flash",
                 descriptor: "Cheap, quick model",
             },
         ]
@@ -130,7 +130,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "DeepSeek's latest advanced model",
             },
             ModelEntry {
-                id: "deepseek/deepseek-v4-flash",
+                id: "deepseek/deepseek-v4-flash-0731",
                 name: "DeepSeek V4 Flash",
                 descriptor: "DeepSeek's latest fast model",
             },
@@ -230,9 +230,9 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Extreme cost, ultra intelligent OpenAI model",
             },
             ModelEntry {
-                id: "openai/gpt-5.3-codex",
-                name: "GPT-5.3 Codex",
-                descriptor: "OpenAI's legacy coding-oriented model",
+                id: "anthropic/claude-opus-4.8",
+                name: "Claude Opus 4.8",
+                descriptor: "Anthropic's previous SOTA coding model",
             },
             ModelEntry {
                 id: "kwaipilot/kat-coder-pro-v2.5",
@@ -263,7 +263,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
     },
 ];
 
-pub const DEFAULT_MODEL: &str = "xiaomi/mimo-v2-flash";
+pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 
 pub fn find_model(id: &str) -> Option<&'static ModelEntry> {
     MODEL_GROUPS
