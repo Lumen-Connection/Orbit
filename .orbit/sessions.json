@@ -1,0 +1,16 @@
+{
+  "sessions": [
+    {
+      "id": "f2aaeb03-b102-4200-8db9-bafaadb6a814",
+      "label": "Orbit",
+      "model": "deepseek/deepseek-v4-flash-0731",
+      "last_active_at": "2026-08-13T14:05:59.416477800+00:00",
+      "touched": [
+        {
+          "path": "src/main.rs",
+          "at": "2026-08-13T14:05:56.804126800+00:00"
+        }
+      ]
+    }
+  ]
+}

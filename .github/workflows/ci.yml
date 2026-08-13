@@ -10,6 +10,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
 
   linux:
@@ -17,11 +22,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install native desktop build dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
           build-essential pkg-config libdbus-1-dev libgl1-mesa-dev libwayland-dev
           libx11-dev libxcursor-dev libxi-dev libxinerama-dev libxkbcommon-dev
           libxrandr-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
       - run: cargo test --all-targets
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

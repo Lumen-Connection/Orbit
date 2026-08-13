@@ -1,0 +1,5 @@
+[advisories]
+# wayland-scanner (eframe / Wayland codegen) pins quick-xml 0.39.
+# These advisories are XML parse DoS in a *build-time* crate, not in Orbit's
+# runtime request path. Remove when eframe moves wayland-scanner forward.
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]

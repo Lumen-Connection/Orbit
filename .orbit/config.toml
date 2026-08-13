@@ -1,0 +1,9 @@
+[commands]
+allowed = []
+
+[context]
+recent_decisions = 10
+token_cap = 4000
+
+[budget]
+session_usd = 2.0

@@ -1,0 +1,32 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Orbit"
+    Manufacturer="Lumen Connection"
+    Version="$(Version)"
+    UpgradeCode="8c1e9b2a-4d6f-4c31-9a0e-7b2f1c4d8e90"
+    Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Orbit is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="OrbitIcon" SourceFile="assets/icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="OrbitIcon" />
+    <Feature Id="Main" Title="Orbit" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Orbit">
+        <ComponentGroup Id="AppFiles">
+          <Component>
+            <File Id="OrbitExe" Source="$(OrbitExe)" KeyPath="yes">
+              <Shortcut
+                Id="StartMenuShortcut"
+                Directory="ProgramMenuFolder"
+                Name="Orbit"
+                Icon="OrbitIcon"
+                Advertise="yes" />
+            </File>
+          </Component>
+        </ComponentGroup>
+      </Directory>
+    </StandardDirectory>
+  </Package>
+</Wix>

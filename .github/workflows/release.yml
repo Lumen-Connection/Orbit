@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/orbit.exe dist/
+          Copy-Item README.md,LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath "Orbit-$ver-windows-x64.zip"
+      - name: WiX MSI
+        shell: pwsh
+        run: |
+          dotnet tool install -g wix
+          wix build packaging/windows/orbit.wxs `
+            -d Version=1.0.0 `
+            -d OrbitExe="$PWD/target/release/orbit.exe" `
+            -o "Orbit-${{ github.ref_name }}-windows-x64.msi"
+        continue-on-error: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Orbit-*-windows-x64.zip
+            Orbit-*-windows-x64.msi
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native desktop build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          build-essential pkg-config libdbus-1-dev libgl1-mesa-dev libwayland-dev
+          libx11-dev libxcursor-dev libxi-dev libxinerama-dev libxkbcommon-dev
+          libxrandr-dev fuse libfuse2
+      - run: cargo build --release
+      - name: AppImage
+        run: |
+          chmod +x packaging/linux/build-appimage.sh
+          packaging/linux/build-appimage.sh target/release/orbit \
+            "Orbit-${GITHUB_REF_NAME}-linux-x86_64.AppImage"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: Orbit-*-linux-x86_64.AppImage

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Orbit
+Comment=Chat and local coding agents via OpenRouter
+Exec=orbit
+Icon=orbit
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=orbit
