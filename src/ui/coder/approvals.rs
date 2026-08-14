@@ -12,16 +12,26 @@ pub fn render(
 ) -> Option<ApprovalDecision> {
     let mut decision = None;
     ui.add_space(8.0);
-    egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::same(10))
+    crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Warning)
+        .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(
-                egui::RichText::new(format!("Approval · {}", handle.tool_name))
-                    .strong()
-                    .color(crate::ui::theme::tokens(ui).warning),
+                egui::RichText::new(format!(
+                    "REVIEW REQUIRED  //  {}",
+                    handle.tool_name.to_uppercase()
+                ))
+                .strong()
+                .monospace()
+                .color(crate::ui::theme::tokens(ui).warning),
             );
-            ui.label(egui::RichText::new(&handle.summary).italics());
+            ui.label(
+                egui::RichText::new("Agent operation is paused until you choose an outcome.")
+                    .small()
+                    .color(crate::ui::theme::tokens(ui).text_muted),
+            );
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(&handle.summary).strong());
             if let Some(patch) = &handle.patch {
                 ui.add_space(6.0);
                 ui.label(
@@ -44,16 +54,22 @@ pub fn render(
                         "Apply"
                     };
                     ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new(approve_label).min_size(egui::vec2(80.0, 28.0)))
-                            .clicked()
-                        {
+                        let approve_button = crate::ui::theme::action_button(
+                            ui,
+                            approve_label,
+                            crate::ui::theme::Tone::Success,
+                        )
+                        .min_size(egui::vec2(96.0, 30.0));
+                        if ui.add(approve_button).clicked() {
                             decision = Some(ApprovalDecision::Approved);
                         }
-                        if ui
-                            .add(egui::Button::new("Deny").min_size(egui::vec2(80.0, 28.0)))
-                            .clicked()
-                        {
+                        let deny_button = crate::ui::theme::action_button(
+                            ui,
+                            "DENY",
+                            crate::ui::theme::Tone::Danger,
+                        )
+                        .min_size(egui::vec2(96.0, 30.0));
+                        if ui.add(deny_button).clicked() {
                             decision = Some(ApprovalDecision::Denied);
                         }
                     });

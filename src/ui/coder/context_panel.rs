@@ -13,8 +13,17 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             return;
         };
         ui.horizontal(|ui| {
-            ui.heading("Project Context");
-            if ui.small_button("Open .orbit").clicked() {
+            ui.label(
+                egui::RichText::new("PROJECT CONTEXT // HANDOFF LOG")
+                    .small()
+                    .strong()
+                    .monospace()
+                    .color(crate::ui::theme::tokens(ui).text_muted),
+            );
+            let open_button =
+                crate::ui::theme::action_button(ui, "OPEN .ORBIT", crate::ui::theme::Tone::Accent)
+                    .small();
+            if ui.add(open_button).clicked() {
                 open_folder = true;
             }
         });
@@ -34,10 +43,12 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         };
 
         if !store.warnings.is_empty() {
-            ui.colored_label(
-                crate::ui::theme::tokens(ui).warning,
-                store.warnings.join(" · "),
-            );
+            crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Warning).show(ui, |ui| {
+                ui.colored_label(
+                    crate::ui::theme::tokens(ui).warning,
+                    store.warnings.join(" · "),
+                );
+            });
             ui.add_space(6.0);
         }
 
@@ -147,7 +158,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             });
 
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("Files changed by session").strong());
+        crate::ui::theme::section_header(ui, "FILES CHANGED BY SESSION");
         ui.add_space(4.0);
         let mut any = false;
         for rec in &store.sessions {

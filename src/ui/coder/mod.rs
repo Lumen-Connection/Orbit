@@ -35,6 +35,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         .resizable(true)
         .default_size(280.0)
         .size_range(200.0..=480.0)
+        .frame(crate::ui::theme::panel(ui).inner_margin(egui::Margin::same(8)))
         .show(ui, |ui| {
             let avail = ui.available_height();
             ui.allocate_ui(egui::vec2(ui.available_width(), avail * 0.5), |ui| {
@@ -48,6 +49,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         .resizable(true)
         .default_size(200.0)
         .size_range(80.0..=480.0)
+        .frame(crate::ui::theme::panel(ui).inner_margin(egui::Margin::same(8)))
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("coder_bottom_stack")
@@ -63,14 +65,17 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         .resizable(true)
         .default_size(240.0)
         .size_range(180.0..=400.0)
+        .frame(crate::ui::theme::panel(ui).inner_margin(egui::Margin::same(8)))
         .show(ui, |ui| {
             context_panel::render(app, ui);
         });
 
-    egui::CentralPanel::default().show(ui, |ui| {
-        sessions::render(app, ui);
-        render_pending_patches(app, ui);
-    });
+    egui::CentralPanel::default()
+        .frame(crate::ui::theme::panel(ui).inner_margin(egui::Margin::same(10)))
+        .show(ui, |ui| {
+            sessions::render(app, ui);
+            render_pending_patches(app, ui);
+        });
 
     render_usage_window(app, ui);
     render_switch_dialog(app, ui);
@@ -137,97 +142,227 @@ fn render_welcome(app: &mut App, ui: &mut egui::Ui) {
     let mut locate: Option<String> = None;
 
     egui::CentralPanel::default().show(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            ui.add_space(48.0);
-            ui.heading("Coder Mode");
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Open a local project to browse files and review diffs.")
-                    .color(crate::ui::theme::tokens(ui).text_muted),
-            );
-            ui.add_space(24.0);
-        });
-
-        ui.horizontal(|ui| {
-            ui.add_space((ui.available_width() - 480.0).max(0.0) / 2.0);
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::same(16))
-                .show(ui, |ui| {
-                    ui.set_width(480.0);
-                    let Screen::Main(state) = &mut app.screen else {
-                        return;
-                    };
-                    ui.label("Project folder");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.coder.path_input)
-                            .desired_width(f32::INFINITY)
-                            .hint_text(r"C:\dev\my-project"),
-                    );
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Open folder").clicked() {
-                            open_typed = true;
-                        }
-                        if ui.button("Browse…").clicked() {
-                            browse = true;
-                        }
-                    });
-                    if let Some(status) = &state.coder.status {
-                        ui.add_space(8.0);
-                        ui.colored_label(crate::ui::theme::tokens(ui).danger, status);
-                    }
-                    ui.add_space(16.0);
+        egui::ScrollArea::vertical()
+            .id_salt("coder_project_intake")
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(36.0);
                     ui.label(
-                        egui::RichText::new("Recent projects")
-                            .small()
+                        egui::RichText::new("CODER // PROJECT INTAKE")
+                            .size(24.0)
                             .strong()
-                            .color(crate::ui::theme::tokens(ui).text_muted),
+                            .monospace()
+                            .color(crate::ui::theme::tokens(ui).text_primary),
                     );
-                    ui.separator();
-                    if state.coder.projects.is_empty() {
-                        ui.label(
-                            egui::RichText::new("No recent projects yet.")
-                                .italics()
-                                .color(crate::ui::theme::tokens(ui).text_muted),
-                        );
-                    }
-                    for project in &state.coder.projects {
-                        let missing = matches!(
-                            project.availability,
-                            crate::workspace::registry::ProjectAvailability::Unavailable
-                        );
-                        ui.horizontal(|ui| {
-                            let label = format!(
-                                "{}  —  {}  ·  {} sessions",
-                                project.name,
-                                project.path.display(),
-                                project.session_count
-                            );
-                            if missing {
-                                ui.add_enabled(
-                                    false,
-                                    egui::Label::new(egui::RichText::new(label).weak()),
-                                )
-                                .on_disabled_hover_text(
-                                    "Folder is missing. Use Locate… to re-bind.",
-                                );
-                                if ui.small_button("Locate…").clicked() {
-                                    locate = Some(project.id.clone());
-                                }
-                            } else if ui.link(label).clicked() {
-                                open_recent = Some(project.path.clone());
-                            }
-                            if ui
-                                .small_button("✕")
-                                .on_hover_text("Remove from history")
-                                .clicked()
-                            {
-                                forget = Some(project.id.clone());
-                            }
-                        });
-                    }
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Select a local workspace to begin an agent operation.",
+                        )
+                        .color(crate::ui::theme::tokens(ui).text_muted),
+                    );
+                    ui.add_space(22.0);
                 });
-        });
+
+                let available_width = ui.available_width();
+                let content_width = (available_width - 32.0).clamp(320.0, 680.0);
+                let side_space = ((available_width - content_width) / 2.0).max(0.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(side_space);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            let Screen::Main(state) = &mut app.screen else {
+                                return;
+                            };
+                            let inner_width = (content_width - 32.0).max(260.0);
+                            crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Accent)
+                                .inner_margin(egui::Margin::same(16))
+                                .show(ui, |ui| {
+                                    ui.set_width(inner_width);
+                                    crate::ui::theme::section_header(ui, "PROJECT FOLDER");
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Enter a path directly or choose a folder from disk.",
+                                        )
+                                        .small()
+                                        .color(crate::ui::theme::tokens(ui).text_muted),
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.add_sized(
+                                        egui::vec2(ui.available_width(), 34.0),
+                                        egui::TextEdit::singleline(
+                                            &mut state.coder.path_input,
+                                        )
+                                        .hint_text(r"C:\dev\my-project"),
+                                    );
+                                    ui.add_space(10.0);
+                                    ui.horizontal(|ui| {
+                                        let open_button = crate::ui::theme::action_button(
+                                            ui,
+                                            "OPEN PATH",
+                                            crate::ui::theme::Tone::Accent,
+                                        )
+                                        .min_size(egui::vec2(120.0, 32.0));
+                                        if ui.add(open_button).clicked() {
+                                            open_typed = true;
+                                        }
+                                        let browse_button = crate::ui::theme::action_button(
+                                            ui,
+                                            "BROWSE FOLDERS…",
+                                            crate::ui::theme::Tone::Neutral,
+                                        )
+                                        .min_size(egui::vec2(140.0, 32.0));
+                                        if ui.add(browse_button).clicked() {
+                                            browse = true;
+                                        }
+                                    });
+                                    if let Some(status) = &state.coder.status {
+                                        ui.add_space(8.0);
+                                        crate::ui::theme::panel_toned(
+                                            ui,
+                                            crate::ui::theme::Tone::Danger,
+                                        )
+                                        .inner_margin(egui::Margin::same(8))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(status)
+                                                    .small()
+                                                    .color(
+                                                        crate::ui::theme::tokens(ui).danger,
+                                                    ),
+                                            );
+                                        });
+                                    }
+                                });
+
+                            ui.add_space(12.0);
+                            crate::ui::theme::panel(ui)
+                                .inner_margin(egui::Margin::same(16))
+                                .show(ui, |ui| {
+                                    ui.set_width(inner_width);
+                                    crate::ui::theme::section_header(ui, "RECENT PROJECTS");
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Resume a workspace with its sessions and pending reviews.",
+                                        )
+                                        .small()
+                                        .color(crate::ui::theme::tokens(ui).text_muted),
+                                    );
+                                    ui.add_space(8.0);
+                                    if state.coder.projects.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new("No recent projects yet.")
+                                                .italics()
+                                                .color(
+                                                    crate::ui::theme::tokens(ui).text_muted,
+                                                ),
+                                        );
+                                    }
+                                    for project in &state.coder.projects {
+                                        let missing = matches!(
+                                            project.availability,
+                                            crate::workspace::registry::ProjectAvailability::Unavailable
+                                        );
+                                        let row_width = ui.available_width();
+                                        crate::ui::theme::panel_toned(
+                                            ui,
+                                            if missing {
+                                                crate::ui::theme::Tone::Warning
+                                            } else {
+                                                crate::ui::theme::Tone::Neutral
+                                            },
+                                        )
+                                        .inner_margin(egui::Margin::same(10))
+                                        .show(ui, |ui| {
+                                            ui.set_width((row_width - 20.0).max(220.0));
+                                            ui.label(
+                                                egui::RichText::new(&project.name)
+                                                    .strong()
+                                                    .color(
+                                                        crate::ui::theme::tokens(ui).text_primary,
+                                                    ),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(
+                                                        project.path.display().to_string(),
+                                                    )
+                                                    .small()
+                                                    .monospace()
+                                                    .color(
+                                                        crate::ui::theme::tokens(ui).text_muted,
+                                                    ),
+                                                )
+                                                .wrap(),
+                                            );
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{} SESSIONS  //  {} PENDING PATCHES",
+                                                    project.session_count,
+                                                    project.pending_patches
+                                                ))
+                                                .small()
+                                                .monospace()
+                                                .color(if missing {
+                                                    crate::ui::theme::tokens(ui).warning
+                                                } else {
+                                                    crate::ui::theme::tokens(ui).text_muted
+                                                }),
+                                            );
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                if missing {
+                                                    let locate_button =
+                                                        crate::ui::theme::action_button(
+                                                            ui,
+                                                            "LOCATE…",
+                                                            crate::ui::theme::Tone::Warning,
+                                                        )
+                                                        .small();
+                                                    if ui.add(locate_button).clicked() {
+                                                        locate = Some(project.id.clone());
+                                                    }
+                                                } else {
+                                                    let open_button =
+                                                        crate::ui::theme::action_button(
+                                                            ui,
+                                                            "OPEN PROJECT",
+                                                            crate::ui::theme::Tone::Accent,
+                                                        )
+                                                        .small();
+                                                    if ui.add(open_button).clicked() {
+                                                        open_recent =
+                                                            Some(project.path.clone());
+                                                    }
+                                                }
+                                                let remove_button =
+                                                    crate::ui::theme::action_button(
+                                                        ui,
+                                                        "REMOVE",
+                                                        crate::ui::theme::Tone::Danger,
+                                                    )
+                                                    .small();
+                                                if ui
+                                                    .add(remove_button)
+                                                    .on_hover_text("Remove from history")
+                                                    .clicked()
+                                                {
+                                                    forget = Some(project.id.clone());
+                                                }
+                                            });
+                                        });
+                                        ui.add_space(8.0);
+                                    }
+                                });
+                        },
+                    );
+                });
+                ui.add_space(36.0);
+            });
     });
 
     if browse {
@@ -260,16 +395,27 @@ fn render_terminal(app: &mut App, ui: &mut egui::Ui) {
             return;
         };
         ui.horizontal(|ui| {
-            ui.strong("Terminal");
+            ui.label(
+                egui::RichText::new("TERMINAL // LIVE OUTPUT")
+                    .small()
+                    .strong()
+                    .monospace()
+                    .color(crate::ui::theme::tokens(ui).text_muted),
+            );
             if let Some(cmd) = &state.coder.terminal.command {
                 ui.label(egui::RichText::new(cmd).monospace().small());
             }
             if state.coder.terminal.running {
-                ui.spinner();
+                if state.settings.motion == crate::storage::MotionPreference::Full {
+                    ui.spinner();
+                }
                 if let Some(started) = state.coder.terminal.started_at {
                     ui.label(format!("{:.1}s", started.elapsed().as_secs_f32()));
                 }
-                if ui.button("Cancel").clicked() {
+                let cancel_button =
+                    crate::ui::theme::action_button(ui, "CANCEL", crate::ui::theme::Tone::Danger)
+                        .small();
+                if ui.add(cancel_button).clicked() {
                     cancel = true;
                 }
             } else if let Some(code) = state.coder.terminal.exit_code {
@@ -305,7 +451,12 @@ fn render_pending_patches(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     ui.separator();
-    ui.heading("Pending diffs");
+    ui.label(
+        egui::RichText::new("PENDING DIFFS // REVIEW QUEUE")
+            .strong()
+            .monospace()
+            .color(crate::ui::theme::tokens(ui).text_primary),
+    );
     let mut apply_at = None;
     for (idx, patch) in state.coder.pending_patches.iter().enumerate() {
         ui.add_space(8.0);
@@ -318,10 +469,12 @@ fn render_pending_patches(app: &mut App, ui: &mut egui::Ui) {
             .strong(),
         );
         widgets::diff::render(ui, &patch.original_content, &patch.proposed_content);
-        if matches!(patch.status, crate::workspace::PatchStatus::Pending)
-            && ui.button("Apply").clicked()
-        {
-            apply_at = Some(idx);
+        if matches!(patch.status, crate::workspace::PatchStatus::Pending) {
+            let apply_button =
+                crate::ui::theme::action_button(ui, "APPLY PATCH", crate::ui::theme::Tone::Success);
+            if ui.add(apply_button).clicked() {
+                apply_at = Some(idx);
+            }
         }
     }
     if let Some(idx) = apply_at {
@@ -334,20 +487,40 @@ pub fn render_mode_bar(app: &mut App, ui: &mut egui::Ui) {
     let mut open_usage = false;
     let mut open_settings = false;
     egui::Panel::top("mode_bar")
-        .exact_size(36.0)
+        .exact_size(48.0)
+        .frame(crate::ui::theme::panel(ui).inner_margin(egui::Margin::symmetric(12, 8)))
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 let Screen::Main(state) = &app.screen else {
                     return;
                 };
-                let title = state
+                let project = state
                     .coder
                     .project
                     .as_ref()
-                    .map(|p| format!("Orbit — {}", p.name))
-                    .unwrap_or_else(|| "Orbit".into());
-                ui.strong(title);
-                ui.add_space(16.0);
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("NO PROJECT");
+                ui.label(
+                    egui::RichText::new("ORBIT")
+                        .strong()
+                        .size(17.0)
+                        .monospace()
+                        .color(crate::ui::theme::tokens(ui).text_primary),
+                );
+                ui.label(
+                    egui::RichText::new("// OPERATIONS")
+                        .small()
+                        .monospace()
+                        .color(crate::ui::theme::tokens(ui).accent),
+                );
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(project.to_uppercase())
+                        .small()
+                        .monospace()
+                        .color(crate::ui::theme::tokens(ui).text_muted),
+                );
+                ui.add_space(12.0);
                 if ui
                     .selectable_label(state.mode == AppMode::Chat, "Chat Mode")
                     .clicked()
@@ -361,10 +534,46 @@ pub fn render_mode_bar(app: &mut App, ui: &mut egui::Ui) {
                     next_mode = Some(AppMode::Coder);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Settings").clicked() {
+                    let credential_tone = match state.credential.state {
+                        crate::app::CredentialState::Present => crate::ui::theme::Tone::Success,
+                        crate::app::CredentialState::Rejected => crate::ui::theme::Tone::Warning,
+                        crate::app::CredentialState::Missing => crate::ui::theme::Tone::Danger,
+                    };
+                    ui.label(crate::ui::theme::status_text(
+                        ui,
+                        match state.credential.state {
+                            crate::app::CredentialState::Present => "LINKED",
+                            crate::app::CredentialState::Rejected => "KEY REJECTED",
+                            crate::app::CredentialState::Missing => "KEY REQUIRED",
+                        },
+                        credential_tone,
+                    ));
+                    let header_action_size = egui::vec2(78.0, 28.0);
+                    if ui
+                        .add_sized(
+                            header_action_size,
+                            crate::ui::theme::action_button(
+                                ui,
+                                egui::RichText::new("SETTINGS").monospace().size(12.0),
+                                crate::ui::theme::Tone::Neutral,
+                            ),
+                        )
+                        .clicked()
+                    {
                         open_settings = true;
                     }
-                    if ui.small_button("Usage").clicked() {
+                    if state.mode == AppMode::Coder
+                        && ui
+                            .add_sized(
+                                header_action_size,
+                                crate::ui::theme::action_button(
+                                    ui,
+                                    egui::RichText::new("USAGE").monospace().size(12.0),
+                                    crate::ui::theme::Tone::Accent,
+                                ),
+                            )
+                            .clicked()
+                    {
                         open_usage = true;
                     }
                 });

@@ -57,82 +57,93 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     let mut new_model_choice: Option<String> = None;
     let mut new_temp_mode: Option<bool> = None;
 
-    egui::Panel::top("top_bar").exact_size(44.0).show(ui, |ui| {
-        let Screen::Main(state) = &mut app.screen else {
-            return;
-        };
-        ui.horizontal_centered(|ui| {
-            let active_label = state.catalog.display_name(&active_model);
+    egui::Panel::top("top_bar")
+        .exact_size(52.0)
+        .frame(crate::ui::theme::panel(ui).inner_margin(egui::Margin::symmetric(12, 8)))
+        .show(ui, |ui| {
+            let Screen::Main(state) = &mut app.screen else {
+                return;
+            };
+            ui.horizontal_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("CHAT // DISPATCH")
+                        .size(13.0)
+                        .strong()
+                        .monospace()
+                        .color(crate::ui::theme::tokens(ui).accent),
+                );
+                ui.separator();
+                let active_label = state.catalog.display_name(&active_model);
 
-            egui::ComboBox::from_id_salt("model_picker")
-                .selected_text(active_label)
-                .width(280.0)
-                .show_ui(ui, |ui| {
-                    ui.set_min_width(360.0);
-                    ui.label(
-                        egui::RichText::new("HIGHLIGHTS")
-                            .small()
-                            .strong()
-                            .color(crate::ui::theme::tokens(ui).text_muted),
-                    );
-                    ui.separator();
-                    for group in MODEL_GROUPS {
+                egui::ComboBox::from_id_salt("model_picker")
+                    .selected_text(active_label)
+                    .width(280.0)
+                    .show_ui(ui, |ui| {
+                        ui.set_min_width(360.0);
                         ui.label(
-                            egui::RichText::new(group.provider.to_uppercase())
+                            egui::RichText::new("HIGHLIGHTS")
                                 .small()
                                 .strong()
                                 .color(crate::ui::theme::tokens(ui).text_muted),
                         );
-                        for entry in group.models {
-                            if model_row(
-                                ui,
-                                entry.id,
-                                entry.name,
-                                Some(entry.descriptor),
-                                active_model == entry.id,
-                            ) {
-                                new_model_choice = Some(entry.id.to_string());
+                        ui.separator();
+                        for group in MODEL_GROUPS {
+                            ui.label(
+                                egui::RichText::new(group.provider.to_uppercase())
+                                    .small()
+                                    .strong()
+                                    .color(crate::ui::theme::tokens(ui).text_muted),
+                            );
+                            for entry in group.models {
+                                if model_row(
+                                    ui,
+                                    entry.id,
+                                    entry.name,
+                                    Some(entry.descriptor),
+                                    active_model == entry.id,
+                                ) {
+                                    new_model_choice = Some(entry.id.to_string());
+                                }
                             }
                         }
-                    }
 
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("ALL MODELS")
-                            .small()
-                            .strong()
-                            .color(crate::ui::theme::tokens(ui).text_muted),
-                    );
-                    ui.separator();
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.model_search)
-                            .hint_text("Search models…")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add_space(4.0);
-                    let matches = state.catalog.search_all(&state.model_search);
-                    let shown = matches.into_iter().take(80);
-                    for model in shown {
-                        if model_row(
-                            ui,
-                            &model.id,
-                            &model.name,
-                            model.descriptor.as_deref(),
-                            active_model == model.id,
-                        ) {
-                            new_model_choice = Some(model.id.clone());
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("ALL MODELS")
+                                .small()
+                                .strong()
+                                .color(crate::ui::theme::tokens(ui).text_muted),
+                        );
+                        ui.separator();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.model_search)
+                                .hint_text("Search models…")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(4.0);
+                        let matches = state.catalog.search_all(&state.model_search);
+                        let shown = matches.into_iter().take(80);
+                        for model in shown {
+                            if model_row(
+                                ui,
+                                &model.id,
+                                &model.name,
+                                model.descriptor.as_deref(),
+                                active_model == model.id,
+                            ) {
+                                new_model_choice = Some(model.id.clone());
+                            }
                         }
+                    });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut temp = temporary_mode;
+                    if ui.toggle_value(&mut temp, "🕓 Temporary chat").changed() {
+                        new_temp_mode = Some(temp);
                     }
                 });
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut temp = temporary_mode;
-                if ui.toggle_value(&mut temp, "🕓 Temporary chat").changed() {
-                    new_temp_mode = Some(temp);
-                }
             });
         });
-    });
 
     if let Some(model) = new_model_choice
         && let Screen::Main(state) = &mut app.screen
@@ -154,6 +165,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             .resizable(true)
             .default_size(220.0)
             .size_range(160.0..=360.0)
+            .frame(crate::ui::theme::panel(ui).inner_margin(egui::Margin::same(8)))
             .show(ui, |ui| {
                 request = Some(sidebar::render(ui, state));
             });
