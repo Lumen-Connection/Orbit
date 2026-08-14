@@ -46,8 +46,8 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Deep thinking",
             },
             ModelEntry {
-                id: "google/gemini-3.6-flash",
-                name: "Gemini 3.6 Flash",
+                id: "google/gemini-3.7-flash",
+                name: "Gemini 3.7 Flash",
                 descriptor: "Balanced model",
             },
             ModelEntry {
@@ -81,13 +81,13 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "SpaceXAI",
         models: &[
             ModelEntry {
-                id: "x-ai/grok-4.5",
-                name: "Grok 4.5",
+                id: "x-ai/grok-4.6",
+                name: "Grok 4.6",
                 descriptor: "Uncensored superpowered reasoning",
             },
             ModelEntry {
-                id: "x-ai/grok-4.3",
-                name: "Grok 4.3",
+                id: "x-ai/grok-4.5",
+                name: "Grok 4.5",
                 descriptor: "Uncensored advanced reasoning",
             },
             ModelEntry {
@@ -121,7 +121,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "DeepSeek",
         models: &[
             ModelEntry {
-                id: "deepseek/deepseek-v4-pro",
+                id: "deepseek/deepseek-v4-pro-0813",
                 name: "DeepSeek V4 Pro",
                 descriptor: "DeepSeek's latest advanced model",
             },
