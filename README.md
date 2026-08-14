@@ -11,41 +11,26 @@ versionable Project Context.
 
 </div>
 
-## What it is
+## Features
 
-Orbit is two products in one window:
 
 - **Chat Mode** — the original lightweight OpenRouter chat client: streaming
   replies, cancel, a live model catalog, and chats stored in the OS data
   directory.
-- **Coder Mode** — open a local folder. Independent agent sessions (different
+- **Agent Mode** — open a local folder. Independent agent sessions (different
   models) read, search, edit and run commands in that project. Writes and new
   commands wait for you. They share a human-readable `.orbit/` context so
   switching models is a handoff, not a restart.
 
-**Windows and Linux only.** macOS is out of scope for v1.0.
-
-## Honest security note
-
-Orbit is a **local desktop app**. There is **no strong sandbox**. Commands run
-as your user, with your files, after you approve them (or after they match the
-project allowlist). Treat this as *controlled trust with an audit trail*, not
-as isolation. Do not open untrusted projects and let an agent run freely.
-
-The API key lives only in the OS credential store (Windows Credential Manager
-or Linux Secret Service). It is never written to disk, logs, events, or the
-diagnostic zip.
-
-See [docs/security.md](docs/security.md).
 
 ## Install
 
 ### From a release
 
-Download the Windows installer (or zip) or the Linux AppImage from
+Download the Windows installer (or potable version) or the Linux AppImage from
 [Releases](https://github.com/Lumen-Connection/Orbit/releases).
 
-### From source
+### Building
 
 ```sh
 cargo build --release
@@ -97,16 +82,7 @@ Created on first open, meant to be committed:
 Details: [docs/orbit-dir.md](docs/orbit-dir.md).  
 Allowlist and budgets: [docs/config.md](docs/config.md).
 
-## Diagnostics
-
-**About Orbit → Export diagnostics…** writes a zip with version, OS, schema
-version, provider list and sanitized logs. No API key.
-
-## Building packages
+## Contributing
 
 See [packaging/README.md](packaging/README.md). Tag a version (`v1.0.0`) to
 run the release workflow.
-
-## License
-
-AGPL-3.0. Source: [github.com/Lumen-Connection/Orbit](https://github.com/Lumen-Connection/Orbit)
