@@ -4,10 +4,9 @@ use super::{Tool, ToolContext, ToolError, ToolOutcome, ToolRisk, truncate_output
 use crate::security::ProposedCommand;
 use async_trait::async_trait;
 use std::process::Stdio;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -104,10 +103,59 @@ Never pass a shell string. Commands need approval unless already allowed."
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let sink = Arc::new(Mutex::new(String::new()));
-        let out_task =
-            stdout.map(|pipe| tokio::spawn(pump_reader(pipe, ctx.terminal.clone(), sink.clone())));
-        let err_task =
-            stderr.map(|pipe| tokio::spawn(pump_reader(pipe, ctx.terminal.clone(), sink.clone())));
+        // Read stdout and stderr interleaved in arrival order via a single
+        // select loop instead of two independent tasks. Two pump tasks writing
+        // to a shared sink cannot preserve interleaving (the OS may deliver
+        // `err`, `out`, `err` chunks and two tasks have no global order), which
+        // scrambles build diagnostics. Ordering matters for diagnosis.
+        let sink_reader = sink.clone();
+        let terminal_tx = ctx.terminal.clone();
+        let reader_task = tokio::spawn(async move {
+            let mut stdout = stdout;
+            let mut stderr = stderr;
+            // Poll both pipes; whichever becomes readable first wins, so the
+            // sink and the live terminal receive chunks in actual arrival order.
+            loop {
+                let (from_out, chunk) = tokio::select! {
+                    out = async {
+                        let mut buf = [0u8; 4096];
+                        match stdout.as_mut().map(|r| r.read(&mut buf)) {
+                            Some(fut) => (true, fut.await.map(|n| (n, buf)).ok()),
+                            None => std::future::pending().await,
+                        }
+                    }, if stdout.is_some() => out,
+                    err = async {
+                        let mut buf = [0u8; 4096];
+                        match stderr.as_mut().map(|r| r.read(&mut buf)) {
+                            Some(fut) => (false, fut.await.map(|n| (n, buf)).ok()),
+                            None => std::future::pending().await,
+                        }
+                    }, if stderr.is_some() => err,
+                };
+                match chunk {
+                    Some((0, _)) | None => {
+                        // EOF on this pipe; future reads would spin, so drop it.
+                        if from_out {
+                            stdout = None;
+                        } else {
+                            stderr = None;
+                        }
+                        if stdout.is_none() && stderr.is_none() {
+                            break;
+                        }
+                    }
+                    Some((n, buf)) => {
+                        let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        if let Some(tx) = &terminal_tx {
+                            let _ = tx.send(TerminalEvent::Chunk(text.clone()));
+                        }
+                        if let Ok(mut out) = sink_reader.lock() {
+                            out.push_str(&text);
+                        }
+                    }
+                }
+            }
+        });
 
         let started = Instant::now();
         let timeout = ctx.command_timeout;
@@ -148,12 +196,7 @@ Never pass a shell string. Commands need approval unless already allowed."
             }
         };
 
-        if let Some(task) = out_task {
-            let _ = task.await;
-        }
-        if let Some(task) = err_task {
-            let _ = task.await;
-        }
+        let _ = reader_task.await;
 
         let duration_ms = started.elapsed().as_millis();
         let body = sink.lock().map(|s| s.clone()).unwrap_or_default();
@@ -199,30 +242,6 @@ struct CommandFinish {
     status: Option<i32>,
     timed_out: bool,
     cancelled: bool,
-}
-
-async fn pump_reader<R: AsyncRead + Unpin>(
-    reader: R,
-    tx: Option<Sender<TerminalEvent>>,
-    sink: Arc<Mutex<String>>,
-) {
-    let mut reader = reader;
-    let mut buf = [0u8; 4096];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                let text = String::from_utf8_lossy(&buf[..n]).into_owned();
-                if let Some(tx) = &tx {
-                    let _ = tx.send(TerminalEvent::Chunk(text.clone()));
-                }
-                if let Ok(mut out) = sink.lock() {
-                    out.push_str(&text);
-                }
-            }
-            Err(_) => break,
-        }
-    }
 }
 
 pub fn is_secret_env(name: &str) -> bool {
@@ -271,6 +290,7 @@ mod tests {
             store: None,
             session_label: String::new(),
             session_model: String::new(),
+            session_role: crate::session::AgentRole::Coder,
             runner: None,
             run_configs: None,
             run_starts: None,
@@ -333,6 +353,34 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn stdout_and_stderr_preserve_arrival_order() {
+        // A build emits interleaved stdout/stderr; the report must reflect the
+        // actual arrival order, not a race between two pump tasks.
+        let (_tmp, ctx) = fixture();
+        let script = if cfg!(windows) {
+            // cmd /c prints to stdout, stderr, then stdout again.
+            "cmd /c echo OUT1 ^& echo ERR1 1>&2 ^& echo OUT2"
+        } else {
+            "sh -c 'echo OUT1; echo ERR1 >&2; echo OUT2'"
+        };
+        let mut parts = script.split_whitespace();
+        let program = parts.next().unwrap();
+        let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+        let out = RunCommand
+            .execute(serde_json::json!({"program": program, "args": args}), &ctx)
+            .await
+            .unwrap();
+        let first = out.content.find("OUT1").expect("OUT1 present");
+        let err = out.content.find("ERR1").expect("ERR1 present");
+        let second = out.content.find("OUT2").expect("OUT2 present");
+        assert!(
+            first < err && err < second,
+            "interleaving lost: {}",
+            out.content
+        );
     }
 
     #[tokio::test]

@@ -1,7 +1,8 @@
 //! Several independent sessions on one project.
 
 use super::{
-    AgentEvent, ApprovalBridge, BudgetBridge, Session, SessionId, TranscriptItem, apply_agent_event,
+    AgentEvent, AgentRole, ApprovalBridge, BudgetBridge, Session, SessionId, TranscriptItem,
+    apply_agent_event,
 };
 use crate::context::HandoffSummary;
 use crate::security::{ApprovalDecision, ApprovalId};
@@ -22,6 +23,7 @@ pub struct LiveSession {
     pub id: SessionId,
     pub label: String,
     pub model: String,
+    pub role: AgentRole,
     pub transcript: Vec<TranscriptItem>,
     pub input: String,
     pub busy: bool,
@@ -35,6 +37,7 @@ pub struct LiveSession {
     pub budget_usd: f64,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    pub cached_tokens: u32,
     pub last_latency_ms: Option<u64>,
     pub iteration: u32,
     pub budget_prompt: Option<(f64, f64)>,
@@ -46,10 +49,12 @@ pub struct LiveSession {
 impl LiveSession {
     pub fn from_session(session: Session) -> Self {
         let budget_usd = session.limits.budget_usd;
+        let role = session.role;
         Self {
             id: session.id.clone(),
             label: session.label.clone(),
             model: session.model.clone(),
+            role,
             handle: Arc::new(tokio::sync::Mutex::new(session)),
             transcript: Vec::new(),
             input: String::new(),
@@ -64,6 +69,7 @@ impl LiveSession {
             budget_usd,
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
             last_latency_ms: None,
             iteration: 0,
             budget_prompt: None,
@@ -85,6 +91,13 @@ impl LiveSession {
         self.model = model.clone();
         if let Ok(mut session) = self.handle.try_lock() {
             session.model = model;
+        }
+    }
+
+    pub fn set_role(&mut self, role: AgentRole) {
+        self.role = role;
+        if let Ok(mut session) = self.handle.try_lock() {
+            session.role = role;
         }
     }
 
@@ -119,7 +132,16 @@ impl SessionManager {
     }
 
     pub fn create(&mut self, label: impl Into<String>, model: impl Into<String>) -> SessionId {
-        let session = Session::new(label, model);
+        self.create_with_role(label, model, AgentRole::Coder)
+    }
+
+    pub fn create_with_role(
+        &mut self,
+        label: impl Into<String>,
+        model: impl Into<String>,
+        role: AgentRole,
+    ) -> SessionId {
+        let session = Session::new(label, model).with_role(role);
         let id = session.id.clone();
         self.sessions.push(LiveSession::from_session(session));
         self.active = self.sessions.len() - 1;
@@ -204,10 +226,12 @@ impl SessionManager {
                         latency_ms,
                         iteration,
                         spent_usd,
+                        cached_tokens,
                     } => {
                         session.prompt_tokens = session.prompt_tokens.saturating_add(input_tokens);
                         session.completion_tokens =
                             session.completion_tokens.saturating_add(output_tokens);
+                        session.cached_tokens = session.cached_tokens.saturating_add(cached_tokens);
                         session.spent_usd = spent_usd;
                         let _ = cost_usd;
                         session.last_latency_ms = Some(latency_ms);
@@ -283,6 +307,7 @@ mod tests {
     };
     use crate::security::Policy;
     use crate::session::agent_loop::{TurnDeps, TurnResult, run_turn};
+    use crate::session::roles::AgentRole;
     use crate::session::{AgentEvent, ApprovalBridge, Session, SessionId};
     use crate::tools::ToolRegistry;
     use crate::workspace::Project;
@@ -458,6 +483,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "m".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,

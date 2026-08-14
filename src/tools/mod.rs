@@ -3,11 +3,13 @@
 
 pub mod context;
 pub mod fs;
+pub mod git;
 pub mod run;
 pub mod shell;
 
 use crate::providers::ToolSchema;
 use crate::session::SessionId;
+use crate::session::roles::AgentRole;
 use crate::workspace::{FilePatch, Project};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -56,6 +58,7 @@ pub struct ToolContext {
     pub store: Option<Arc<Mutex<crate::context::OrbitStore>>>,
     pub session_label: String,
     pub session_model: String,
+    pub session_role: AgentRole,
     pub runner: Option<std::sync::Arc<std::sync::Mutex<crate::runner::ProcessRegistry>>>,
     pub run_configs: Option<Vec<crate::workspace::run_config::RunConfig>>,
     pub run_starts:
@@ -76,6 +79,7 @@ impl ToolContext {
             store: None,
             session_label: String::new(),
             session_model: String::new(),
+            session_role: AgentRole::Coder,
             runner: None,
             run_configs: None,
             run_starts: None,
@@ -154,6 +158,7 @@ impl ToolRegistry {
         registry.register(Arc::new(fs::Glob));
         registry.register(Arc::new(fs::WriteFile));
         registry.register(Arc::new(fs::EditFile));
+        registry.register(Arc::new(fs::MultiEdit));
         registry.register(Arc::new(shell::RunCommand));
         registry.register(Arc::new(run::ListRunConfigs));
         registry.register(Arc::new(run::ReadRunOutput));
@@ -162,6 +167,11 @@ impl ToolRegistry {
         registry.register(Arc::new(context::RecordDecision));
         registry.register(Arc::new(context::AddFinding));
         registry.register(Arc::new(context::UpdateTask));
+        registry.register(Arc::new(context::RecordPlan));
+        registry.register(Arc::new(context::ApproveStage));
+        registry.register(Arc::new(git::GitStatus));
+        registry.register(Arc::new(git::GitCommit));
+        registry.register(Arc::new(git::GitPush));
         registry
     }
 
@@ -180,6 +190,20 @@ impl ToolRegistry {
         } else {
             truncate_output(outcome.content)
         })
+    }
+}
+
+impl ToolRegistry {
+    /// The full workspace registry restricted to the tools a role may call.
+    /// This is the catalog sent to the model, so a role without a writing tool
+    /// simply does not receive one. Equivalent to `workspace_tools()` for Coder.
+    pub fn for_role(role: AgentRole) -> Self {
+        let mut registry = Self::workspace_tools();
+        let allowed = role.allowed_tools();
+        registry
+            .tools
+            .retain(|name, _| allowed.contains(&name.as_str()));
+        registry
     }
 }
 
@@ -231,6 +255,7 @@ mod tests {
         AiProvider, ChatMessage, ChatRequest, FinishReason, ProviderError, ProviderEvent,
     };
     use crate::session::SessionId;
+    use crate::session::roles::AgentRole;
     use async_trait::async_trait;
     use futures_util::stream::{self, BoxStream, StreamExt};
     use std::sync::Arc;
@@ -254,6 +279,65 @@ mod tests {
         assert!(outcome.truncated);
         assert!(outcome.content.contains("[truncated:"));
         assert!(outcome.content.chars().count() > TOOL_OUTPUT_CHAR_LIMIT);
+    }
+
+    #[test]
+    fn for_role_narrows_the_catalog_size() {
+        assert_eq!(ToolRegistry::for_role(AgentRole::Coder).schemas().len(), 15);
+        assert_eq!(
+            ToolRegistry::for_role(AgentRole::Reviewer).schemas().len(),
+            13
+        );
+        assert_eq!(
+            ToolRegistry::for_role(AgentRole::Architect).schemas().len(),
+            8
+        );
+        assert_eq!(
+            ToolRegistry::for_role(AgentRole::Tester).schemas().len(),
+            15
+        );
+    }
+
+    #[test]
+    fn for_role_removes_writing_and_execution_tools() {
+        let reviewer = ToolRegistry::for_role(AgentRole::Reviewer);
+        assert!(reviewer.get("write_file").is_none());
+        assert!(reviewer.get("edit_file").is_none());
+        assert!(reviewer.get("read_file").is_some());
+
+        let architect = ToolRegistry::for_role(AgentRole::Architect);
+        assert!(architect.get("run_command").is_none());
+        assert!(architect.get("write_file").is_none());
+        assert!(architect.get("record_decision").is_some());
+    }
+
+    #[test]
+    fn for_role_removes_schemas_sent_to_the_model() {
+        let schemas = ToolRegistry::for_role(AgentRole::Reviewer).schemas();
+        for schema in &schemas {
+            assert_ne!(schema.name, "write_file");
+            assert_ne!(schema.name, "edit_file");
+        }
+    }
+
+    #[test]
+    fn for_role_coder_is_a_subset_of_workspace_tools() {
+        let coder = ToolRegistry::for_role(AgentRole::Coder);
+        let workspace = ToolRegistry::workspace_tools();
+        let a: Vec<String> = coder.schemas().into_iter().map(|s| s.name).collect();
+        let b: Vec<String> = workspace.schemas().into_iter().map(|s| s.name).collect();
+        for name in &a {
+            assert!(
+                b.contains(name),
+                "coder tool `{name}` missing from workspace"
+            );
+        }
+        assert!(b.contains(&"git_status".into()));
+        assert!(b.contains(&"record_plan".into()));
+        assert!(b.contains(&"approve_stage".into()));
+        assert!(!a.contains(&"git_status".into()));
+        assert!(!a.contains(&"record_plan".into()));
+        assert!(!a.contains(&"approve_stage".into()));
     }
 
     struct ScriptedProvider {
@@ -326,6 +410,7 @@ mod tests {
             tools: registry.schemas(),
             temperature: None,
             max_output_tokens: None,
+            system_cache_chars: 0,
         };
         let mut stream = provider.stream_chat(first, cancel.clone()).await.unwrap();
         let mut acc = AssistantAccumulator::new();
@@ -365,6 +450,7 @@ mod tests {
             tools: registry.schemas(),
             temperature: None,
             max_output_tokens: None,
+            system_cache_chars: 0,
         };
         let mut stream = provider.stream_chat(second, cancel).await.unwrap();
         let mut acc = AssistantAccumulator::new();

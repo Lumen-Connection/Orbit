@@ -174,5 +174,13 @@ fn dispatch_shortcuts(app: &mut App, ctx: &egui::Context) {
         shortcuts::ShortcutId::FontBigger => app.nudge_font_scale(0.1),
         shortcuts::ShortcutId::FontSmaller => app.nudge_font_scale(-0.1),
         shortcuts::ShortcutId::FontReset => app.reset_font_scale(),
+        shortcuts::ShortcutId::ToggleMode => {
+            if let Screen::Main(state) = &mut app.screen {
+                state.mode = match state.mode {
+                    AppMode::Chat => AppMode::Coder,
+                    AppMode::Coder => AppMode::Chat,
+                };
+            }
+        }
     }
 }

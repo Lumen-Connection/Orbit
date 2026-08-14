@@ -130,6 +130,8 @@ fn deps(
         store,
         session_label: "implementation".into(),
         session_model: "e2e".into(),
+        session_role: crate::session::AgentRole::Coder,
+        summary_model: None,
         db: None,
         prompt_price: prices.0,
         completion_price: prices.1,
@@ -190,6 +192,69 @@ async fn coding_flow_search_edit_approve_command_decision() {
     let decisions =
         std::fs::read_to_string(project.canonical_root.join(".orbit/decisions.md")).unwrap();
     assert!(decisions.contains("Rename authenticate to login"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stage_finished_completed_reaches_the_orchestrator() {
+    struct StopOnce;
+    #[async_trait]
+    impl AiProvider for StopOnce {
+        fn id(&self) -> &'static str {
+            "stop"
+        }
+        async fn list_models(&self) -> Result<Vec<AiModel>, ProviderError> {
+            Ok(Vec::new())
+        }
+        fn supports_tools(&self, _: &ModelId) -> bool {
+            true
+        }
+        async fn stream_chat(
+            &self,
+            _: ChatRequest,
+            _: CancellationToken,
+        ) -> Result<BoxStream<'static, Result<ProviderEvent, ProviderError>>, ProviderError>
+        {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta("ok".into())),
+                Ok(ProviderEvent::Finished(FinishReason::Stop)),
+            ])))
+        }
+    }
+
+    let (_tmp, project, store) = fixture();
+    let (events_tx, _events_rx) = mpsc::channel();
+    let (pipe_tx, pipe_rx) = mpsc::channel();
+    let session = Arc::new(tokio::sync::Mutex::new(Session::new("coder", "e2e")));
+    let sid = SessionId::new("coder-stage");
+    let result = run_turn(
+        session,
+        Some("go".into()),
+        deps(
+            Arc::new(StopOnce),
+            project,
+            Some(store),
+            CancellationToken::new(),
+            Policy::default(),
+            events_tx,
+            ApprovalBridge::new(),
+            None,
+            (None, None),
+            BudgetBridge::new(),
+        ),
+    )
+    .await;
+    let _ = pipe_tx.send(crate::pipeline::PipelineEvent::stage_finished(
+        sid.clone(),
+        result,
+    ));
+    let ev = pipe_rx.recv().unwrap();
+    assert_eq!(
+        ev,
+        crate::pipeline::PipelineEvent::StageFinished {
+            session_id: sid,
+            result: crate::pipeline::StageResult::Completed,
+        }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

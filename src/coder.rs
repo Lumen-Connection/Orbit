@@ -213,7 +213,6 @@ pub struct CoderState {
     pub path_input: String,
     pub status: Option<String>,
     pub sessions: SessionManager,
-    pub registry: Arc<ToolRegistry>,
     pub policy: Policy,
     pub terminal: TerminalState,
     pub store: Option<Arc<std::sync::Mutex<OrbitStore>>>,
@@ -232,6 +231,11 @@ pub struct CoderState {
     pub run_pending_approval: Option<crate::workspace::run_config::RunConfig>,
     pub runner: std::sync::Arc<std::sync::Mutex<crate::runner::ProcessRegistry>>,
     pub run_restart_prompt: Option<crate::workspace::run_config::RunConfig>,
+    pub coder_search: String,
+    pub pipeline_tx: Option<std::sync::mpsc::Sender<crate::pipeline::PipelineEvent>>,
+    pub pipeline_rx: Option<Receiver<crate::pipeline::PipelineEvent>>,
+    pub pipeline: Option<crate::pipeline::Pipeline>,
+    pub pipeline_dialog: Option<crate::pipeline::PipelineConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +259,7 @@ pub struct RestoredSession {
     pub id: String,
     pub label: String,
     pub model: String,
+    pub role: crate::session::AgentRole,
     pub messages: Vec<ChatMessage>,
     pub spent_usd: f64,
     pub prompt_tokens: u32,
@@ -265,6 +270,7 @@ pub struct RestoredSession {
 
 impl Default for CoderState {
     fn default() -> Self {
+        let (pipeline_tx, pipeline_rx) = mpsc::channel();
         Self {
             project: None,
             recent: load_recent_projects(),
@@ -280,7 +286,6 @@ impl Default for CoderState {
             path_input: String::new(),
             status: None,
             sessions: SessionManager::new(),
-            registry: Arc::new(ToolRegistry::workspace_tools()),
             policy: Policy::default(),
             terminal: TerminalState::default(),
             store: None,
@@ -301,6 +306,11 @@ impl Default for CoderState {
                 crate::runner::ProcessRegistry::default(),
             )),
             run_restart_prompt: None,
+            coder_search: String::new(),
+            pipeline_tx: Some(pipeline_tx),
+            pipeline_rx: Some(pipeline_rx),
+            pipeline: None,
+            pipeline_dialog: None,
         }
     }
 }
@@ -917,6 +927,7 @@ impl App {
         let budget_bridge = live.budget_bridge.clone();
         let budget_usd = live.budget_usd;
         let spent_start = live.spent_usd;
+        let pipeline_tx = state.coder.pipeline_tx.clone();
         let prices = state
             .catalog
             .find(&session_model)
@@ -926,19 +937,27 @@ impl App {
             live.busy = false;
             return;
         };
+        let session_role = live.role;
         let deps = TurnDeps {
             provider,
-            registry: state.coder.registry.clone(),
+            registry: Arc::new(ToolRegistry::for_role(session_role)),
             project,
             events: tx,
             approvals,
             policy: state.coder.policy.clone(),
             cancel,
-            session_id,
+            session_id: session_id.clone(),
             terminal: state.coder.terminal.tx.clone(),
             store: state.coder.store.clone(),
             session_label,
             session_model: session_model.clone(),
+            session_role,
+            summary_model: state
+                .coder
+                .store
+                .as_ref()
+                .and_then(|s| s.lock().ok())
+                .and_then(|store| store.settings.summary_model.clone()),
             db: Some(self.db.clone()),
             prompt_price: prices.0,
             completion_price: prices.1,
@@ -976,7 +995,12 @@ impl App {
                 let mut session = session.lock().await;
                 session.model = session_model;
             }
-            let _ = run_turn(session, None, deps).await;
+            let result = run_turn(session, None, deps).await;
+            if let Some(tx) = pipeline_tx {
+                let _ = tx.send(crate::pipeline::PipelineEvent::stage_finished(
+                    session_id, result,
+                ));
+            }
         });
     }
 
@@ -1202,6 +1226,7 @@ impl App {
         let approvals = live.approvals.clone();
         let budget_bridge = live.budget_bridge.clone();
         let budget_usd = live.budget_usd;
+        let pipeline_tx = state.coder.pipeline_tx.clone();
         let prices = state
             .catalog
             .find(&session_model)
@@ -1215,19 +1240,27 @@ impl App {
             ));
             return;
         };
+        let session_role = live.role;
         let deps = TurnDeps {
             provider,
-            registry: state.coder.registry.clone(),
+            registry: Arc::new(ToolRegistry::for_role(session_role)),
             project,
             events: tx,
             approvals,
             policy: state.coder.policy.clone(),
             cancel,
-            session_id,
+            session_id: session_id.clone(),
             terminal: state.coder.terminal.tx.clone(),
             store: state.coder.store.clone(),
             session_label,
             session_model: session_model.clone(),
+            session_role,
+            summary_model: state
+                .coder
+                .store
+                .as_ref()
+                .and_then(|s| s.lock().ok())
+                .and_then(|store| store.settings.summary_model.clone()),
             db: Some(self.db.clone()),
             prompt_price: prices.0,
             completion_price: prices.1,
@@ -1265,7 +1298,12 @@ impl App {
                 let mut session = session.lock().await;
                 session.model = session_model;
             }
-            let _ = run_turn(session, user_input, deps).await;
+            let result = run_turn(session, user_input, deps).await;
+            if let Some(tx) = pipeline_tx {
+                let _ = tx.send(crate::pipeline::PipelineEvent::stage_finished(
+                    session_id, result,
+                ));
+            }
         });
     }
 
@@ -1335,8 +1373,303 @@ impl App {
         let id = state.coder.sessions.create(label.clone(), model.clone());
         apply_session_limits(state, &id);
         persist_live_session(state, &id, &label, &model);
-        persist_session_db(&self.db, &self.rt, &project, &id, &label, &model);
+        persist_session_db(
+            &self.db,
+            &self.rt,
+            &project,
+            &id,
+            &label,
+            &model,
+            crate::session::AgentRole::Coder.id(),
+        );
         refresh_active_handoff(state);
+    }
+
+    pub fn open_pipeline_dialog(&mut self) {
+        let crate::app::Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        let default = state.settings.coder_default_model.clone();
+        state.coder.pipeline_dialog = Some(crate::pipeline::PipelineConfig {
+            feature: String::new(),
+            complexity: crate::pipeline::Complexity::Normal,
+            planner: crate::pipeline::StageModel {
+                auto: true,
+                model: crate::providers::catalog::auto_model_for(
+                    crate::pipeline::contract::StageKind::Planner,
+                )
+                .to_string(),
+            },
+            coder: crate::pipeline::StageModel {
+                auto: true,
+                model: crate::providers::catalog::auto_model_for(
+                    crate::pipeline::contract::StageKind::Coder,
+                )
+                .to_string(),
+            },
+            reviewer: crate::pipeline::StageModel {
+                auto: true,
+                model: crate::providers::catalog::auto_model_for(
+                    crate::pipeline::contract::StageKind::Reviewer,
+                )
+                .to_string(),
+            },
+            git_gate: crate::pipeline::GitGateMode::Manual,
+            auto_planner_to_coder: true,
+            auto_coder_to_reviewer: true,
+        });
+        let _ = default;
+    }
+
+    pub fn confirm_pipeline_dialog(&mut self) {
+        let config = {
+            let crate::app::Screen::Main(state) = &mut self.screen else {
+                return;
+            };
+            state.coder.pipeline_dialog.take()
+        };
+        let Some(mut config) = config else {
+            return;
+        };
+        if config.planner.auto {
+            config.planner.model = crate::providers::catalog::auto_model_for(
+                crate::pipeline::contract::StageKind::Planner,
+            )
+            .into();
+        }
+        if config.coder.auto {
+            config.coder.model = crate::providers::catalog::auto_model_for(
+                crate::pipeline::contract::StageKind::Coder,
+            )
+            .into();
+        }
+        if config.reviewer.auto {
+            config.reviewer.model = crate::providers::catalog::auto_model_for(
+                crate::pipeline::contract::StageKind::Reviewer,
+            )
+            .into();
+        }
+        self.instantiate_pipeline(config);
+    }
+
+    fn instantiate_pipeline(&mut self, config: crate::pipeline::PipelineConfig) {
+        let crate::app::Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        if crate::app::can_create_session(state.credential.state).is_err() {
+            return;
+        }
+        let Some(project) = state.coder.project.clone() else {
+            return;
+        };
+        let mut pipeline = crate::pipeline::Pipeline::new(config.clone());
+        for stage in config.intelligence_stages() {
+            let role = match stage {
+                crate::pipeline::contract::StageKind::Planner => {
+                    crate::session::AgentRole::Architect
+                }
+                crate::pipeline::contract::StageKind::Reviewer => {
+                    crate::session::AgentRole::Reviewer
+                }
+                _ => crate::session::AgentRole::Coder,
+            };
+            let model = config.model_for(stage).to_string();
+            let label = format!(
+                "{} · {}",
+                stage.label(),
+                crate::ui::truncate(&config.feature, 24)
+            );
+            let id = state
+                .coder
+                .sessions
+                .create_with_role(label.clone(), model.clone(), role);
+            apply_session_limits(state, &id);
+            persist_live_session(state, &id, &label, &model);
+            persist_session_db(&self.db, &self.rt, &project, &id, &label, &model, role.id());
+            pipeline.bind_session(stage, id);
+        }
+        pipeline.note(
+            pipeline.current,
+            "Pipeline created. Sessions are idle until Start or the first prompt.",
+        );
+        state.coder.pipeline = Some(pipeline);
+        refresh_active_handoff(state);
+    }
+
+    pub fn start_pipeline(&mut self) {
+        let action = {
+            let crate::app::Screen::Main(state) = &mut self.screen else {
+                return;
+            };
+            state.coder.pipeline.as_ref().and_then(|p| p.first_start())
+        };
+        if let Some(action) = action {
+            self.apply_pipeline_action(action);
+        }
+    }
+
+    pub fn cancel_pipeline(&mut self) {
+        let crate::app::Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        let Some(pipeline) = state.coder.pipeline.as_mut() else {
+            return;
+        };
+        pipeline.cancel_all();
+        for id in [
+            &pipeline.planner_id,
+            &pipeline.coder_id,
+            &pipeline.reviewer_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(live) = state.coder.sessions.get_mut(id) {
+                live.cancel();
+            }
+        }
+        state.coder.status = Some("Pipeline cancelled.".into());
+    }
+
+    pub fn poll_pipeline(&mut self) {
+        let events: Vec<crate::pipeline::PipelineEvent> = {
+            let crate::app::Screen::Main(state) = &mut self.screen else {
+                return;
+            };
+            let Some(rx) = &state.coder.pipeline_rx else {
+                return;
+            };
+            let mut out = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                out.push(ev);
+            }
+            out
+        };
+        for event in events {
+            let review = {
+                let crate::app::Screen::Main(state) = &self.screen else {
+                    continue;
+                };
+                state.coder.project.as_ref().and_then(|p| {
+                    crate::pipeline::contract::ContractStore::open(&p.canonical_root)
+                        .reviewer()
+                        .ok()
+                        .flatten()
+                })
+            };
+            let action = {
+                let crate::app::Screen::Main(state) = &mut self.screen else {
+                    continue;
+                };
+                let Some(pipeline) = state.coder.pipeline.as_mut() else {
+                    continue;
+                };
+                pipeline.on_stage_finished(&event, review.as_ref())
+            };
+            self.apply_pipeline_action(action);
+        }
+    }
+
+    fn apply_pipeline_action(&mut self, action: crate::pipeline::NextAction) {
+        match action {
+            crate::pipeline::NextAction::None => {}
+            crate::pipeline::NextAction::Start {
+                session,
+                prompt,
+                stage,
+            } => {
+                if let crate::app::Screen::Main(state) = &mut self.screen {
+                    state.coder.sessions.select(&session);
+                    if let Some(live) = state.coder.sessions.active_mut() {
+                        live.transcript
+                            .push(crate::session::TranscriptItem::User(prompt.clone()));
+                        live.input.clear();
+                    }
+                    if let Some(pipeline) = state.coder.pipeline.as_mut() {
+                        pipeline.note(stage, format!("Starting {}", stage.label()));
+                    }
+                }
+                self.launch_coder_turn(Some(prompt));
+            }
+            crate::pipeline::NextAction::RunVerify => self.run_pipeline_verify(),
+            crate::pipeline::NextAction::WaitGitGate => {
+                if let crate::app::Screen::Main(state) = &mut self.screen {
+                    state.coder.status =
+                        Some("Git Gate: approve commit/push when you are ready.".into());
+                }
+            }
+            crate::pipeline::NextAction::Stop { reason } => {
+                if let crate::app::Screen::Main(state) = &mut self.screen {
+                    state.coder.status = Some(reason);
+                    if let Some(pipeline) = &state.coder.pipeline
+                        && pipeline.review_cycles >= crate::pipeline::MAX_REVIEW_CYCLES
+                        && let Some(store) = &state.coder.store
+                        && let Ok(mut store) = store.lock()
+                    {
+                        let ids: Vec<String> = store
+                            .tasks
+                            .iter()
+                            .filter(|t| t.status != crate::context::store::TaskStatus::Done)
+                            .map(|t| t.id.clone())
+                            .collect();
+                        for id in ids {
+                            let _ = store.upsert_task(
+                                Some(id),
+                                crate::context::store::TaskStatus::Open,
+                                String::new(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn run_pipeline_verify(&mut self) {
+        let crate::app::Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        let Some(project) = state.coder.project.clone() else {
+            return;
+        };
+        let configs: Vec<_> = state
+            .coder
+            .run_configs
+            .iter()
+            .chain(state.coder.suggested_runs.iter())
+            .cloned()
+            .collect();
+        let cmds = crate::pipeline::verify::plan_verify_commands(&project.canonical_root, &configs);
+        let report = crate::pipeline::verify::run_verify(
+            &cmds,
+            &crate::pipeline::verify::SystemRunner,
+            &project.canonical_root,
+        );
+        let summary = report.summary();
+        let store = crate::pipeline::contract::ContractStore::open(&project.canonical_root);
+        let mut coder = store.coder().ok().flatten().unwrap_or_default();
+        coder.lint_results = report
+            .steps
+            .iter()
+            .filter(|s| s.name != "test")
+            .map(|s| format!("{}: {}", s.name, if s.passed { "pass" } else { "fail" }))
+            .collect::<Vec<_>>()
+            .join("\n");
+        coder.test_results = report
+            .steps
+            .iter()
+            .filter(|s| s.name == "test")
+            .map(|s| s.output.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        coder.tests_executed = report.steps.iter().map(|s| s.name.clone()).collect();
+        let _ = store.write_coder(&coder);
+        let action = if let Some(pipeline) = state.coder.pipeline.as_mut() {
+            pipeline.on_verify_finished(report.passed(), &summary)
+        } else {
+            crate::pipeline::NextAction::None
+        };
+        self.apply_pipeline_action(action);
     }
 
     pub fn select_coder_session(&mut self, id: SessionId) {
@@ -1366,18 +1699,18 @@ impl App {
             }
             return;
         }
-        let model = state
+        let (model, role) = state
             .coder
             .sessions
             .get_mut(&id)
             .map(|s| {
                 s.set_label(label.clone());
-                s.model.clone()
+                (s.model.clone(), s.role.id().to_string())
             })
             .unwrap_or_default();
         persist_live_session(state, &id, &label, &model);
         if let Some(project) = state.coder.project.clone() {
-            persist_session_db(&self.db, &self.rt, &project, &id, &label, &model);
+            persist_session_db(&self.db, &self.rt, &project, &id, &label, &model, &role);
         }
     }
 
@@ -1498,6 +1831,7 @@ impl App {
                     &live.id,
                     &live.label,
                     &live.model,
+                    live.role.id(),
                 );
             }
         }
@@ -1545,11 +1879,33 @@ impl App {
         }
         let id = live.id.clone();
         let label = live.label.clone();
+        let role = live.role.id().to_string();
         live.set_model(model.clone());
         persist_live_session(state, &id, &label, &model);
         if let Some(project) = state.coder.project.clone() {
-            persist_session_db(&self.db, &self.rt, &project, &id, &label, &model);
+            persist_session_db(&self.db, &self.rt, &project, &id, &label, &model, &role);
         }
+    }
+
+    pub fn set_coder_role(&mut self, role: crate::session::AgentRole) {
+        let crate::app::Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        let Some(live) = state.coder.sessions.active_mut() else {
+            return;
+        };
+        if live.busy {
+            return;
+        }
+        let id = live.id.clone();
+        let label = live.label.clone();
+        let model = live.model.clone();
+        live.set_role(role);
+        persist_live_session(state, &id, &label, &model);
+        if let Some(project) = state.coder.project.clone() {
+            persist_session_db(&self.db, &self.rt, &project, &id, &label, &model, role.id());
+        }
+        refresh_active_handoff(state);
     }
 }
 
@@ -1605,7 +1961,6 @@ fn start_scan(
 
 fn reset_agent_session(state: &mut MainState, project_name: &str, create_session: bool) {
     state.coder.sessions.shutdown();
-    state.coder.registry = Arc::new(ToolRegistry::workspace_tools());
     let model = state.settings.coder_default_model.clone();
     let id = if create_session {
         let id = state.coder.sessions.create(project_name, model.clone());
@@ -1671,7 +2026,13 @@ fn flush_coder_state(state: &MainState, db: &Db) {
         tracing::warn!("could not flush project: {e:#}");
     }
     for live in &state.coder.sessions.sessions {
-        if let Err(e) = db.upsert_session(&project.id, &live.id, &live.label, &live.model) {
+        if let Err(e) = db.upsert_session_with_role(
+            &project.id,
+            &live.id,
+            &live.label,
+            &live.model,
+            live.role.id(),
+        ) {
             tracing::warn!("could not flush session: {e:#}");
         }
         if let Ok(session) = live.handle.try_lock() {
@@ -1735,17 +2096,19 @@ fn persist_session_db(
     id: &SessionId,
     label: &str,
     model: &str,
+    role: &str,
 ) {
     let db = db.clone();
     let project = project.clone();
     let id = id.clone();
     let label = label.to_string();
     let model = model.to_string();
+    let role = role.to_string();
     rt.spawn_blocking(move || {
         if let Err(e) = db.upsert_project(&project) {
             tracing::warn!("could not persist project: {e:#}");
         }
-        if let Err(e) = db.upsert_session(&project.id, &id, &label, &model) {
+        if let Err(e) = db.upsert_session_with_role(&project.id, &id, &label, &model, &role) {
             tracing::warn!("could not persist session: {e:#}");
         }
     });
@@ -1782,6 +2145,7 @@ fn load_snapshot(db: &Db, project_id: &str) -> anyhow::Result<ProjectSnapshot> {
             id: row.id,
             label: row.label,
             model: row.model_id,
+            role: row.role,
             messages,
             spent_usd: usage.cost_usd,
             prompt_tokens: usage.input_tokens,
@@ -1814,7 +2178,8 @@ fn apply_snapshot(state: &mut MainState, snapshot: ProjectSnapshot) {
         .unwrap_or(DEFAULT_SESSION_BUDGET_USD);
     let max_iterations = state.settings.max_iterations;
     for restored in snapshot.sessions {
-        let mut session = Session::new(restored.label.clone(), restored.model.clone());
+        let mut session =
+            Session::new(restored.label.clone(), restored.model.clone()).with_role(restored.role);
         session.id = SessionId::new(restored.id);
         session.messages = restored.messages.clone();
         session.context_summary = restored.context_summary;

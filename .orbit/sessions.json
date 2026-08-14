@@ -4,11 +4,170 @@
       "id": "f2aaeb03-b102-4200-8db9-bafaadb6a814",
       "label": "Orbit",
       "model": "deepseek/deepseek-v4-flash-0731",
-      "last_active_at": "2026-08-13T14:05:59.416477800+00:00",
+      "last_active_at": "2026-08-13T18:02:47.627228+00:00",
       "touched": [
         {
           "path": "src/main.rs",
           "at": "2026-08-13T14:05:56.804126800+00:00"
+        },
+        {
+          "path": "src/session/roles.rs",
+          "at": "2026-08-13T17:31:41.943229600+00:00"
+        },
+        {
+          "path": "src/session/mod.rs",
+          "at": "2026-08-13T15:44:44.575465100+00:00"
+        },
+        {
+          "path": "src/tools/mod.rs",
+          "at": "2026-08-13T15:29:20.518179300+00:00"
+        },
+        {
+          "path": "src/session/agent_loop.rs",
+          "at": "2026-08-13T16:27:57.965913100+00:00"
+        },
+        {
+          "path": "src/tools/context.rs",
+          "at": "2026-08-13T16:34:31.441136300+00:00"
+        },
+        {
+          "path": "src/e2e.rs",
+          "at": "2026-08-13T15:30:46.442844+00:00"
+        },
+        {
+          "path": "src/session/manager.rs",
+          "at": "2026-08-13T17:29:21.904225700+00:00"
+        },
+        {
+          "path": "src/tools/fs.rs",
+          "at": "2026-08-13T15:47:51.205834500+00:00"
+        },
+        {
+          "path": "src/tools/shell.rs",
+          "at": "2026-08-13T15:47:55.865024400+00:00"
+        },
+        {
+          "path": "src/coder.rs",
+          "at": "2026-08-13T17:51:15.354591200+00:00"
+        },
+        {
+          "path": "migrations/0005_session_role.sql",
+          "at": "2026-08-13T16:02:27.872496+00:00"
+        },
+        {
+          "path": "src/storage/db.rs",
+          "at": "2026-08-13T17:41:50.074207400+00:00"
+        },
+        {
+          "path": "src/context/store.rs",
+          "at": "2026-08-13T17:00:32.868076100+00:00"
+        },
+        {
+          "path": "src/context/digest.rs",
+          "at": "2026-08-13T16:38:50.343035100+00:00"
+        },
+        {
+          "path": "src/ui/coder/sessions.rs",
+          "at": "2026-08-13T17:23:11.376680200+00:00"
+        }
+      ]
+    },
+    {
+      "id": "a9027990-12a1-4729-aa14-72cbd4268c72",
+      "label": "Session 2",
+      "model": "z-ai/glm-5.2",
+      "last_active_at": "2026-08-13T19:49:50.432907500+00:00",
+      "touched": []
+    },
+    {
+      "id": "685c24d2-fe85-474b-8995-9735ecc2f540",
+      "label": "Session 3",
+      "model": "deepseek/deepseek-v4-flash-0731",
+      "last_active_at": "2026-08-14T04:00:11.483748500+00:00",
+      "touched": [
+        {
+          "path": "src/session/agent_loop.rs",
+          "at": "2026-08-14T03:47:14.294317200+00:00"
+        },
+        {
+          "path": "src/coder.rs",
+          "at": "2026-08-14T02:58:21.822945300+00:00"
+        },
+        {
+          "path": "src/tools/fs.rs",
+          "at": "2026-08-14T03:49:03.166135200+00:00"
+        },
+        {
+          "path": "src/tools/mod.rs",
+          "at": "2026-08-14T03:15:01.726827+00:00"
+        },
+        {
+          "path": "src/session/roles.rs",
+          "at": "2026-08-13T20:33:53.969227600+00:00"
+        },
+        {
+          "path": "src/context/digest.rs",
+          "at": "2026-08-13T20:40:02.870109600+00:00"
+        },
+        {
+          "path": "src/providers/openrouter.rs",
+          "at": "2026-08-14T03:19:34.900461900+00:00"
+        },
+        {
+          "path": "src/session/mod.rs",
+          "at": "2026-08-13T20:49:03.380148200+00:00"
+        },
+        {
+          "path": "src/session/manager.rs",
+          "at": "2026-08-13T22:01:16.902424900+00:00"
+        },
+        {
+          "path": "src/ui/widgets/cost_meter.rs",
+          "at": "2026-08-13T21:46:12.390801900+00:00"
+        },
+        {
+          "path": "src/tools/shell.rs",
+          "at": "2026-08-13T21:10:03.296628100+00:00"
+        },
+        {
+          "path": "src/ui/shortcuts.rs",
+          "at": "2026-08-13T21:42:58.190078300+00:00"
+        },
+        {
+          "path": "src/ui/mod.rs",
+          "at": "2026-08-13T21:43:20.910256800+00:00"
+        },
+        {
+          "path": "src/context/store.rs",
+          "at": "2026-08-13T22:04:40.606816900+00:00"
+        },
+        {
+          "path": "src/e2e.rs",
+          "at": "2026-08-13T22:01:28.600624100+00:00"
+        },
+        {
+          "path": "src/ui/coder/sessions.rs",
+          "at": "2026-08-14T03:04:29.986933+00:00"
+        },
+        {
+          "path": "src/providers/mod.rs",
+          "at": "2026-08-14T03:09:55.542761500+00:00"
+        },
+        {
+          "path": "src/app.rs",
+          "at": "2026-08-14T03:13:23.935800200+00:00"
+        },
+        {
+          "path": "src/pipeline/mod.rs",
+          "at": "2026-08-14T03:49:51.900400400+00:00"
+        },
+        {
+          "path": "src/main.rs",
+          "at": "2026-08-14T03:42:17.728127600+00:00"
+        },
+        {
+          "path": "PlanejamentoMelhoriaPENDENTES.md",
+          "at": "2026-08-14T03:59:36.150134400+00:00"
         }
       ]
     }

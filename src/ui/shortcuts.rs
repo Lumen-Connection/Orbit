@@ -14,6 +14,7 @@ pub enum ShortcutId {
     FontBigger,
     FontSmaller,
     FontReset,
+    ToggleMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,6 +87,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "Ctrl+0",
         while_typing: true,
     },
+    Shortcut {
+        id: ShortcutId::ToggleMode,
+        label: "Toggle Chat / Coder",
+        keys: "Ctrl+Shift+M",
+        while_typing: false,
+    },
 ];
 
 pub fn consume(ctx: &egui::Context, text_focused: bool) -> Option<ShortcutId> {
@@ -121,6 +128,7 @@ fn matches(input: &mut egui::InputState, id: ShortcutId) -> bool {
         }
         ShortcutId::FontSmaller => input.consume_key(cmd, egui::Key::Minus),
         ShortcutId::FontReset => input.consume_key(cmd, egui::Key::Num0),
+        ShortcutId::ToggleMode => input.consume_key(cmd_shift, egui::Key::M),
     }
 }
 
@@ -142,6 +150,7 @@ mod tests {
             ShortcutId::FontBigger,
             ShortcutId::FontSmaller,
             ShortcutId::FontReset,
+            ShortcutId::ToggleMode,
         ] {
             assert!(ids.contains(&required), "missing {required:?}");
         }

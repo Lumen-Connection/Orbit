@@ -1,5 +1,6 @@
 //! One user turn: stream → tools → maybe approve → repeat.
 
+use super::AgentRole;
 use super::{AgentEvent, ApprovalBridge, ApprovalHandle, BudgetBridge, Session, SessionId};
 use crate::context::OrbitStore;
 use crate::providers::accumulate::AssistantAccumulator;
@@ -38,6 +39,8 @@ pub struct TurnDeps {
     pub store: Option<Arc<Mutex<OrbitStore>>>,
     pub session_label: String,
     pub session_model: String,
+    pub session_role: AgentRole,
+    pub summary_model: Option<String>,
     pub db: Option<Arc<Db>>,
     pub prompt_price: Option<f64>,
     pub completion_price: Option<f64>,
@@ -123,6 +126,7 @@ pub async fn run_turn(
         }
 
         let system = compose_system(&deps, &label);
+        let system_cache_chars = system_cache_prefix_chars(&deps);
         let messages = pack_messages(&session, &deps, &system, messages).await;
         let request = ChatRequest {
             model,
@@ -131,6 +135,7 @@ pub async fn run_turn(
             tools: deps.registry.schemas(),
             temperature: None,
             max_output_tokens: None,
+            system_cache_chars,
         };
 
         let mut stream = match deps
@@ -212,6 +217,7 @@ pub async fn run_turn(
                 latency_ms,
                 iteration: iterations,
                 spent_usd: spent,
+                cached_tokens: usage.cached_tokens,
             });
         }
 
@@ -246,6 +252,30 @@ pub async fn dispatch_tool(call: &ToolCall, deps: &TurnDeps) -> ChatMessage {
     let Some(tool) = deps.registry.get(&call.name) else {
         return finish_tool(deps, call, format!("unknown tool `{}`", call.name), true);
     };
+
+    // Security boundary at dispatch time, independent of the catalog the model
+    // received. Even if a registry with the full tool set reaches here (e.g. a
+    // Reviewer whose turn somehow carried a write tool), the role's permission
+    // matrix is the final word. The catalog is a filter; this is the guard.
+    // Enforcement is limited to canonical workspace tools so custom test tools
+    // (echo, slow, …) registered directly on a registry pass through.
+    if crate::session::roles::CANONICAL_TOOLS.contains(&call.name.as_str())
+        && !deps
+            .session_role
+            .allowed_tools()
+            .contains(&call.name.as_str())
+    {
+        return finish_tool(
+            deps,
+            call,
+            format!(
+                "Tool `{}` is not allowed for role {}.",
+                call.name,
+                deps.session_role.label()
+            ),
+            true,
+        );
+    }
 
     let patches = Arc::new(Mutex::new(Vec::new()));
     let mut ctx = bind_ctx(deps, patches.clone(), false);
@@ -349,6 +379,7 @@ fn bind_ctx(
         store: deps.store.clone(),
         session_label: deps.session_label.clone(),
         session_model: deps.session_model.clone(),
+        session_role: deps.session_role,
         runner: deps.run_env.runner.clone(),
         run_configs: Some(deps.run_env.configs.clone()),
         run_starts: Some(deps.run_env.starts.clone()),
@@ -421,8 +452,10 @@ async fn summarize_middle(deps: &TurnDeps, middle: &[ChatMessage]) -> Result<Str
     if middle.is_empty() {
         return Ok(String::new());
     }
+    // Use the configured cheaper summary model when present, else the session's.
+    let model = deps.summary_model.as_deref().unwrap_or(&deps.session_model);
     let request = ChatRequest {
-        model: deps.session_model.clone(),
+        model: model.to_string(),
         system: Some(
             "Summarize this conversation chronologically. Keep decisions, file paths, errors, \
              and user intent. Omit chatter. Output only the summary."
@@ -432,6 +465,7 @@ async fn summarize_middle(deps: &TurnDeps, middle: &[ChatMessage]) -> Result<Str
         tools: Vec::new(),
         temperature: Some(0.2),
         max_output_tokens: Some(800),
+        system_cache_chars: 0,
     };
     let mut stream = deps
         .provider
@@ -448,9 +482,9 @@ async fn summarize_middle(deps: &TurnDeps, middle: &[ChatMessage]) -> Result<Str
         if let Some(db) = &deps.db {
             let db = db.clone();
             let sid = deps.session_id.clone();
-            let model = deps.session_model.clone();
+            let modele = model.to_string();
             tokio::task::spawn_blocking(move || {
-                let _ = db.insert_usage_kind(&sid, &model, &usage, cost, None, "summary");
+                let _ = db.insert_usage_kind(&sid, &modele, &usage, cost, None, "summary");
             });
         }
     }
@@ -482,13 +516,21 @@ fn fail_provider(deps: &TurnDeps, err: crate::providers::ProviderError) -> TurnR
     TurnResult::Failed(msg)
 }
 
+/// Compose the role's base prompt: agent instructions plus the role posture
+/// fragment. The Project Context digest, if any, is appended by the caller.
+fn system_prompt_for(role: AgentRole) -> String {
+    format!("{CODER_SYSTEM_PROMPT}\n\n{}", role.prompt_fragment())
+}
+
 /// Build the effective Coder Mode system prompt (agent instructions + digest).
+/// Kept as a Coder prompt: it is the default persona, and the existing test
+/// relies on its shape. Runtime turns use `compose_system` which varies by role.
 pub fn compose_coder_system(
     store: Option<&OrbitStore>,
     session_id: &SessionId,
     project_name: &str,
 ) -> String {
-    let mut system = CODER_SYSTEM_PROMPT.to_string();
+    let mut system = system_prompt_for(AgentRole::Coder);
     if let Some(store) = store {
         let digest = crate::context::build_digest(store, session_id, project_name);
         system.push_str("\n\n");
@@ -498,18 +540,31 @@ pub fn compose_coder_system(
 }
 
 fn compose_system(deps: &TurnDeps, _label: &str) -> String {
+    let mut system = system_prompt_for(deps.session_role);
     if let Some(store) = &deps.store
         && let Ok(mut store) = store.lock()
     {
         store.reload();
         let digest = crate::context::build_digest(&store, &deps.session_id, &deps.project.name);
         tracing::debug!(tokens = digest.token_estimate, "injected project context");
-        let mut system = CODER_SYSTEM_PROMPT.to_string();
         system.push_str("\n\n");
         system.push_str(&digest.text);
         return system;
     }
-    compose_coder_system(None, &deps.session_id, &deps.project.name)
+    system
+}
+
+/// Number of leading chars of the composed system that are the stable, cacheable
+/// prefix — the base prompt plus the role fragment — as opposed to the per-turn
+/// Project Context digest. Enables explicit prompt caching (N0.5) on the prefix.
+/// Returns 0 when no store is open (no digest, so nothing worth splitting).
+fn system_cache_prefix_chars(deps: &TurnDeps) -> usize {
+    if deps.store.is_none() {
+        return 0;
+    }
+    // Byte length: split_at in encode_messages operates on byte indices, and the
+    // system prompt is pure ASCII so this aligns with char length too.
+    system_prompt_for(deps.session_role).len()
 }
 
 fn mark_session_active(deps: &TurnDeps) {
@@ -528,10 +583,11 @@ fn persist_patch(deps: &TurnDeps, patch: &crate::workspace::FilePatch) {
     let project = (*deps.project).clone();
     let label = deps.session_label.clone();
     let model = deps.session_model.clone();
+    let role = deps.session_role.id().to_string();
     let patch = patch.clone();
     tokio::task::spawn_blocking(move || {
         let _ = db.upsert_project(&project);
-        let _ = db.upsert_session(&project.id, &sid, &label, &model);
+        let _ = db.upsert_session_with_role(&project.id, &sid, &label, &model, &role);
         if let Err(e) = db.upsert_file_change(&project.id, &sid, &patch) {
             tracing::warn!("could not persist file change: {e:#}");
         }
@@ -546,13 +602,14 @@ fn persist_messages(deps: &TurnDeps, messages: &[ChatMessage]) {
     let project = (*deps.project).clone();
     let label = deps.session_label.clone();
     let model = deps.session_model.clone();
+    let role = deps.session_role.id().to_string();
     let messages = messages.to_vec();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = db.upsert_project(&project) {
             tracing::warn!("could not persist project: {e:#}");
             return;
         }
-        if let Err(e) = db.upsert_session(&project.id, &sid, &label, &model) {
+        if let Err(e) = db.upsert_session_with_role(&project.id, &sid, &label, &model, &role) {
             tracing::warn!("could not persist session: {e:#}");
             return;
         }
@@ -785,7 +842,10 @@ pub fn summarize(name: &str, args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TurnDeps, TurnResult, dispatch_tool, run_turn};
+    use super::{
+        AgentRole, CODER_SYSTEM_PROMPT, TurnDeps, TurnResult, dispatch_tool, run_turn,
+        system_prompt_for,
+    };
     use crate::providers::{
         AiModel, AiProvider, ChatMessage, ChatRequest, FinishReason, ModelId, ProviderError,
         ProviderEvent, TokenUsage, ToolCall,
@@ -897,6 +957,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1061,6 +1123,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1101,6 +1165,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1160,6 +1226,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1222,6 +1290,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1339,6 +1409,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1392,6 +1464,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1443,6 +1517,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "scripted".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: None,
             completion_price: None,
@@ -1565,6 +1641,8 @@ mod tests {
             store: None,
             session_label: "t".into(),
             session_model: "pricey".into(),
+            session_role: AgentRole::Coder,
+            summary_model: None,
             db: None,
             prompt_price: Some(0.01),
             completion_price: Some(0.02),
@@ -1606,5 +1684,99 @@ mod tests {
             prompt.contains("coding assistant"),
             "effective prompt must include agent instructions"
         );
+    }
+
+    #[test]
+    fn reviewer_prompt_includes_base_and_role_fragment() {
+        let prompt = system_prompt_for(AgentRole::Reviewer);
+        assert!(prompt.starts_with(CODER_SYSTEM_PROMPT));
+        assert!(prompt.contains(AgentRole::Reviewer.prompt_fragment()));
+        assert!(prompt.contains("do not have any writing tools"));
+    }
+
+    #[test]
+    fn architect_prompt_includes_its_fragment_but_not_reviewers() {
+        let architect = system_prompt_for(AgentRole::Architect);
+        assert!(architect.contains(AgentRole::Architect.prompt_fragment()));
+        assert!(!architect.contains(AgentRole::Reviewer.prompt_fragment()));
+    }
+
+    #[test]
+    fn all_roles_produce_distinct_prompts() {
+        let prompts: Vec<String> = AgentRole::ALL
+            .iter()
+            .map(|r| system_prompt_for(*r))
+            .collect();
+        for i in 0..prompts.len() {
+            for j in (i + 1)..prompts.len() {
+                assert_ne!(prompts[i], prompts[j], "roles {i} and {j} share a prompt");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_guard_refuses_write_for_reviewer_even_with_full_registry() {
+        // N0.1: the security boundary lives at dispatch time, not just in the
+        // catalog. Feed a Reviewer a full (14-tool) registry and ask it to
+        // write_file; the dispatch guard must refuse regardless.
+        let (_tmp, project) = project();
+        let mut deps = deps(
+            Arc::new(Scripted {
+                turn: AtomicUsize::new(0),
+            }),
+            project,
+            CancellationToken::new(),
+            Policy::default(),
+        )
+        .0;
+        deps.session_role = AgentRole::Reviewer;
+
+        let call = ToolCall {
+            id: crate::providers::ToolCallId::from("call_write"),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs", "content": "// pwned\n"}),
+        };
+        let result = dispatch_tool(&call, &deps).await;
+        let ChatMessage::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("expected a tool result message");
+        };
+        assert!(
+            is_error,
+            "write_file by a Reviewer must be an error outcome"
+        );
+        assert!(
+            content.contains("not allowed for role Reviewer"),
+            "unexpected guard message: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_guard_allows_allowed_tool_for_reviewer() {
+        // A Reviewer may still use a read tool carried by the same full registry.
+        let (_tmp, project) = project();
+        let mut deps = deps(
+            Arc::new(Scripted {
+                turn: AtomicUsize::new(0),
+            }),
+            project,
+            CancellationToken::new(),
+            Policy::default(),
+        )
+        .0;
+        deps.session_role = AgentRole::Reviewer;
+
+        let call = ToolCall {
+            id: crate::providers::ToolCallId::from("call_read"),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs"}),
+        };
+        let result = dispatch_tool(&call, &deps).await;
+        let ChatMessage::ToolResult { is_error, .. } = result else {
+            panic!("expected a tool result message");
+        };
+        assert!(!is_error, "read_file by a Reviewer must be allowed");
     }
 }

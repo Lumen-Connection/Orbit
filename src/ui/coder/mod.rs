@@ -1,6 +1,7 @@
 mod approvals;
 mod context_panel;
 mod explorer;
+mod pipeline;
 mod run_configs;
 mod run_panel;
 mod sessions;
@@ -18,6 +19,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     app.poll_terminal();
     app.poll_restore();
     app.poll_usage_report();
+    app.poll_pipeline();
 
     let has_project = matches!(
         &app.screen,

@@ -4,6 +4,7 @@ use super::approvals;
 use crate::app::{
     App, CredentialState, MODEL_GROUPS, Screen, SettingsTab, can_create_session, credential_state,
 };
+use crate::session::roles::AgentRole;
 use crate::session::{SessionId, TranscriptItem};
 use eframe::egui;
 
@@ -13,6 +14,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     let mut toggle_tool = None;
     let mut resolve = None;
     let mut new_model = None;
+    let mut new_role = None;
     let mut select: Option<SessionId> = None;
     let mut close: Option<SessionId> = None;
     let mut create = false;
@@ -28,6 +30,8 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     let mut commit_edit = false;
     let mut cancel_edit = false;
     let mut export = false;
+    let mut open_pipeline = false;
+    let mut select_search: Option<SessionId> = None;
 
     {
         let Screen::Main(state) = &mut app.screen else {
@@ -67,10 +71,51 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             if add.clicked() {
                 create = true;
             }
+            if ui
+                .add_enabled(allowed, egui::Button::new("Pipeline").small())
+                .on_hover_text("Configure a Planner / Coder / Reviewer pipeline")
+                .clicked()
+            {
+                open_pipeline = true;
+            }
             if !allowed && ui.small_button("Configure key").clicked() {
                 open_settings = true;
             }
         });
+
+        // Reuse the FTS history index to find a past Coder session by content.
+        let _search = ui.add(
+            egui::TextEdit::singleline(&mut state.coder.coder_search)
+                .hint_text("Search past sessions (content)…")
+                .desired_width(f32::INFINITY),
+        );
+        let search_query = state.coder.coder_search.trim().to_string();
+        let hits = if search_query.is_empty() || !allowed {
+            Vec::new()
+        } else {
+            app.db
+                .search_history(&search_query, 8)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|h| h.source == "session")
+                .collect::<Vec<_>>()
+        };
+        if !hits.is_empty() {
+            ui.add_space(4.0);
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    for hit in hits {
+                        if ui
+                            .button(format!("{} — {}", hit.title, hit.snippet))
+                            .clicked()
+                        {
+                            select_search = Some(SessionId::new(&hit.item_id));
+                        }
+                    }
+                });
+        }
+        ui.add_space(4.0);
 
         if !allowed && state.coder.sessions.sessions.is_empty() {
             ui.add_space(28.0);
@@ -116,7 +161,10 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                         rename = Some((session.id.clone(), session.label.clone()));
                     }
                 } else {
-                    let tab = ui.selectable_label(selected, format!("{}{mark}", session.label));
+                    let tab = ui.selectable_label(
+                        selected,
+                        format!("{} {}{mark}", session.role.icon(), session.label),
+                    );
                     if tab.clicked() {
                         select = Some(session.id.clone());
                     }
@@ -151,6 +199,30 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let role_label = format!("{} {}", live.role.icon(), live.role.label());
+                    let busy = live.busy;
+                    let role_combo = egui::ComboBox::from_id_salt("coder_role")
+                        .selected_text(role_label)
+                        .width(130.0);
+                    ui.add_enabled_ui(!busy, |ui| {
+                        role_combo.show_ui(ui, |ui| {
+                            for role in AgentRole::ALL {
+                                if ui
+                                    .selectable_label(
+                                        live.role == role,
+                                        format!("{} {}", role.icon(), role.label()),
+                                    )
+                                    .clicked()
+                                {
+                                    new_role = Some(role);
+                                }
+                            }
+                        });
+                    })
+                    .response
+                    .on_disabled_hover_text(
+                        "Role switching takes effect on the next turn when this session is not busy.",
+                    );
                     let label = state.catalog.display_name(&live.model);
                     egui::ComboBox::from_id_salt("coder_model")
                         .selected_text(label)
@@ -422,7 +494,15 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     if create {
         app.new_coder_session();
     }
+    if open_pipeline {
+        app.open_pipeline_dialog();
+    }
+    super::pipeline::render_dialog(app, ui);
+    super::pipeline::render_banner(app, ui);
     if let Some(id) = select {
+        app.select_coder_session(id);
+    }
+    if let Some(id) = select_search {
         app.select_coder_session(id);
     }
     if let Some(id) = close {
@@ -445,6 +525,9 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(model) = new_model {
         app.set_coder_model(model);
+    }
+    if let Some(role) = new_role {
+        app.set_coder_role(role);
     }
     if let Some(idx) = toggle_tool
         && let Screen::Main(state) = &mut app.screen
