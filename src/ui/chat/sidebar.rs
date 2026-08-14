@@ -37,14 +37,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut MainState) -> SidebarRequest {
     let list_h = (total_h - about_row_height - 16.0).max(40.0);
 
     ui.allocate_ui(egui::vec2(ui.available_width(), list_h), |ui| {
-        ui.add_space(8.0);
-        if ui
-            .add_sized(
-                [ui.available_width(), 32.0],
-                egui::Button::new("➕  New chat"),
-            )
-            .clicked()
-        {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("ARCHIVE // CHAT LOG")
+                .small()
+                .strong()
+                .monospace()
+                .color(palette.text_muted),
+        );
+        ui.add_space(6.0);
+        let new_chat_button =
+            crate::ui::theme::action_button(ui, "+  NEW DISPATCH", crate::ui::theme::Tone::Accent)
+                .min_size(egui::vec2(ui.available_width(), 32.0));
+        if ui.add(new_chat_button).clicked() {
             request.new_chat = true;
         }
         ui.add_space(6.0);
@@ -58,15 +63,24 @@ pub fn render(ui: &mut egui::Ui, state: &mut MainState) -> SidebarRequest {
             state.focus_search_next_frame = false;
         }
         ui.add_space(8.0);
-        ui.separator();
+        crate::ui::theme::section_header(ui, "CHAT LIST");
 
         if state.temporary_mode {
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Temporary mode is on.\nThis chat will not be saved.")
-                    .italics()
-                    .color(palette.text_muted),
-            );
+            crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Warning).show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("TEMPORARY MODE")
+                        .small()
+                        .strong()
+                        .monospace()
+                        .color(palette.warning),
+                );
+                ui.label(
+                    egui::RichText::new("This dispatch will not be saved.")
+                        .small()
+                        .color(palette.text_muted),
+                );
+            });
             return;
         }
 
@@ -98,9 +112,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut MainState) -> SidebarRequest {
                     if last_group != Some(group) {
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(group.label())
+                            egui::RichText::new(group.label().to_uppercase())
                                 .small()
                                 .strong()
+                                .monospace()
                                 .color(palette.text_muted),
                         );
                         last_group = Some(group);
@@ -111,7 +126,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut MainState) -> SidebarRequest {
                         .renaming_chat
                         .as_ref()
                         .is_some_and(|(id, _)| *id == row.id);
-                    ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
                         if editing_this {
                             if let Some((_, draft)) = state.renaming_chat.as_mut() {
                                 let resp = ui.add(
@@ -143,47 +158,52 @@ pub fn render(ui: &mut egui::Ui, state: &mut MainState) -> SidebarRequest {
                                 );
                             }
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("🗑").on_hover_text("Delete chat").clicked() {
-                                request.delete = Some(row.id);
-                            }
-                            let pin = if row.pinned { "★" } else { "☆" };
-                            if ui.small_button(pin).on_hover_text("Pin to top").clicked() {
-                                request.toggle_pin = Some(row.id);
-                            }
+
+                        // Keep row actions below the title so narrow archive panels never
+                        // obscure the chat name. The selected label supplies the only active
+                        // treatment; no extra marker glyph is needed.
+                        ui.horizontal(|ui| {
                             if ui
-                                .small_button("⇪")
+                                .small_button("↓")
                                 .on_hover_text("Export Markdown")
                                 .clicked()
                             {
                                 request.export = Some(row.id);
                             }
+                            let pin = if row.pinned { "★" } else { "☆" };
+                            if ui.small_button(pin).on_hover_text("Pin to top").clicked() {
+                                request.toggle_pin = Some(row.id);
+                            }
+                            if ui.small_button("🗑").on_hover_text("Delete chat").clicked() {
+                                request.delete = Some(row.id);
+                            }
                         });
                     });
+                    ui.add_space(3.0);
                 }
             });
     });
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(8.0);
+        let signout_button = crate::ui::theme::action_button(
+            ui,
+            "EJECT  /  CHANGE KEY",
+            crate::ui::theme::Tone::Danger,
+        )
+        .min_size(egui::vec2(ui.available_width(), 28.0));
         if ui
-            .add_sized(
-                [ui.available_width(), 28.0],
-                egui::Button::new("⏏  Sign out / change key"),
-            )
+            .add(signout_button)
             .on_hover_text("Remove the cached API key and return to onboarding")
             .clicked()
         {
             request.eject = true;
         }
         ui.add_space(4.0);
-        if ui
-            .add_sized(
-                [ui.available_width(), 28.0],
-                egui::Button::new("⚙  Settings"),
-            )
-            .clicked()
-        {
+        let settings_button =
+            crate::ui::theme::action_button(ui, "SETTINGS", crate::ui::theme::Tone::Neutral)
+                .min_size(egui::vec2(ui.available_width(), 28.0));
+        if ui.add(settings_button).clicked() {
             request.settings = true;
         }
     });

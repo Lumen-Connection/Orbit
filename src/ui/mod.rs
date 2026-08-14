@@ -18,34 +18,41 @@ pub(crate) const FADE_DURATION: Duration = Duration::from_millis(300);
 /// Returns `true` when the user asks to retry initialization.
 pub fn render_init_error(ui: &mut egui::Ui, message: &str) -> bool {
     let mut retry = false;
-    egui::CentralPanel::default().show(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            ui.heading("Orbit could not start");
-            ui.add_space(12.0);
-            ui.label(egui::RichText::new(message).color(theme::tokens(ui).danger));
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "If this mentions {}, start or unlock it and try again.",
-                    crate::secure_store::SecureStore::display_name()
-                ))
-                .color(crate::ui::theme::tokens(ui).text_muted),
-            );
-            ui.add_space(20.0);
-            if ui
-                .add(egui::Button::new("Try again").min_size(egui::vec2(140.0, 32.0)))
-                .clicked()
-            {
-                retry = true;
-            }
+    egui::CentralPanel::default()
+        .frame(theme::panel(ui))
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(64.0);
+                ui.label(
+                    egui::RichText::new("ORBIT // STARTUP FAULT")
+                        .size(24.0)
+                        .strong()
+                        .monospace(),
+                );
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new(message).color(theme::tokens(ui).danger));
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "If this mentions {}, start or unlock it and try again.",
+                        crate::secure_store::SecureStore::display_name()
+                    ))
+                    .color(crate::ui::theme::tokens(ui).text_muted),
+                );
+                ui.add_space(20.0);
+                let retry_button = theme::action_button(ui, "TRY AGAIN", theme::Tone::Accent)
+                    .min_size(egui::vec2(140.0, 32.0));
+                if ui.add(retry_button).clicked() {
+                    retry = true;
+                }
+            });
         });
-    });
     retry
 }
 
 pub fn render(app: &mut App, ui: &mut egui::Ui) {
     apply_appearance(app, ui.ctx());
+    theme::paint_grid(ui);
     dispatch_shortcuts(app, ui.ctx());
     app.poll_validation();
     app.poll_catalog();
@@ -103,7 +110,12 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 
 fn apply_appearance(app: &App, ctx: &egui::Context) {
     if let Screen::Main(state) = &app.screen {
-        theme::apply(ctx, state.settings.theme, state.settings.font_scale);
+        theme::apply(
+            ctx,
+            state.settings.theme,
+            state.settings.font_scale,
+            state.settings.motion,
+        );
     }
 }
 

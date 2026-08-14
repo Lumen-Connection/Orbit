@@ -17,9 +17,19 @@ pub const MAX_FONT_SCALE: f32 = 2.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemePreference {
     #[default]
-    System,
-    Light,
     Dark,
+    Light,
+    System,
+}
+
+/// Controls non-essential UI transitions. Full motion is the default for a
+/// more expressive operational console; Reduced keeps status feedback but
+/// removes decorative reveals and pulses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MotionPreference {
+    #[default]
+    Full,
+    Reduced,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +48,8 @@ pub struct AppSettings {
     pub theme: ThemePreference,
     #[serde(default = "default_font_scale")]
     pub font_scale: f32,
+    #[serde(default)]
+    pub motion: MotionPreference,
     #[serde(default = "default_recent_keep")]
     pub context_recent_messages: usize,
 }
@@ -74,8 +86,9 @@ impl Default for AppSettings {
             session_budget_usd: default_budget(),
             max_iterations: default_max_iterations(),
             request_timeout_secs: default_timeout(),
-            theme: ThemePreference::System,
+            theme: ThemePreference::Dark,
             font_scale: default_font_scale(),
+            motion: MotionPreference::Full,
             context_recent_messages: default_recent_keep(),
         }
     }
@@ -157,8 +170,9 @@ mod tests {
         let settings = AppSettings::default();
         assert_eq!(settings.chat_default_model, DEFAULT_MODEL);
         assert_eq!(settings.max_iterations, DEFAULT_MAX_ITERATIONS);
-        assert_eq!(settings.theme, ThemePreference::System);
+        assert_eq!(settings.theme, ThemePreference::Dark);
         assert!((settings.font_scale - 1.0).abs() < f32::EPSILON);
+        assert_eq!(settings.motion, MotionPreference::Full);
     }
 
     #[test]
@@ -169,6 +183,7 @@ mod tests {
         assert_eq!(settings.chat_default_model, "openai/gpt-4.1");
         assert_eq!(settings.coder_default_model, DEFAULT_MODEL);
         assert_eq!(settings.request_timeout_secs, DEFAULT_REQUEST_TIMEOUT_SECS);
+        assert_eq!(settings.motion, MotionPreference::Full);
     }
 
     #[test]
@@ -181,6 +196,7 @@ mod tests {
             request_timeout_secs: 0,
             theme: ThemePreference::Light,
             font_scale: 9.0,
+            motion: MotionPreference::Reduced,
             context_recent_messages: 0,
         }
         .sanitized();

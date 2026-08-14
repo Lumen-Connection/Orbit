@@ -3,7 +3,7 @@
 use crate::app::{App, CredentialState, KeyTestStatus, Screen, SettingsTab};
 use crate::providers::catalog::MODEL_GROUPS;
 use crate::secure_store::SecureStore;
-use crate::storage::{self, ThemePreference};
+use crate::storage::{self, MotionPreference, ThemePreference};
 use eframe::egui;
 
 pub fn render(app: &mut App, ui: &mut egui::Ui) {
@@ -19,8 +19,10 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     egui::Window::new("Settings")
         .open(&mut still_open)
         .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .default_width(620.0)
         .default_height(440.0)
+        .frame(crate::ui::theme::panel(ui))
         .show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -314,7 +316,12 @@ fn render_limits(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn render_appearance(app: &mut App, ui: &mut egui::Ui) {
-    ui.heading("Appearance");
+    ui.label(
+        egui::RichText::new("APPEARANCE // CONSOLE PROFILE")
+            .strong()
+            .monospace()
+            .color(crate::ui::theme::tokens(ui).text_primary),
+    );
     ui.add_space(8.0);
     let mut dirty = false;
     if let Screen::Main(state) = &mut app.screen {
@@ -344,6 +351,32 @@ fn render_appearance(app: &mut App, ui: &mut egui::Ui) {
                         .changed();
                     dirty |= ui
                         .selectable_value(&mut state.settings.theme, ThemePreference::Dark, "Dark")
+                        .changed();
+                });
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Motion");
+            let motion_label = match state.settings.motion {
+                MotionPreference::Full => "Full feedback",
+                MotionPreference::Reduced => "Reduced",
+            };
+            egui::ComboBox::from_id_salt("settings_motion")
+                .selected_text(motion_label)
+                .show_ui(ui, |ui| {
+                    dirty |= ui
+                        .selectable_value(
+                            &mut state.settings.motion,
+                            MotionPreference::Full,
+                            "Full feedback",
+                        )
+                        .changed();
+                    dirty |= ui
+                        .selectable_value(
+                            &mut state.settings.motion,
+                            MotionPreference::Reduced,
+                            "Reduced",
+                        )
                         .changed();
                 });
         });

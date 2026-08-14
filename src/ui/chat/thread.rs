@@ -1,5 +1,6 @@
 use crate::app::{MainState, Message, MessageEdit, Role};
 use crate::session::message_ops::{self, MdPart};
+use crate::storage::MotionPreference;
 use crate::ui::message_actions::{self, HoverAction};
 use crate::ui::theme::tokens;
 use crate::ui::{FADE_DURATION, with_alpha};
@@ -42,6 +43,7 @@ pub fn render(
         action = ThreadAction::PersistChats;
     }
     let palette = tokens(ui);
+    let motion = state.settings.motion;
     if let Some(hint) = &state.retry_hint {
         ui.colored_label(palette.warning, hint);
     }
@@ -54,7 +56,7 @@ pub fn render(
     }
     ui.horizontal(|ui| {
         if ui
-            .small_button("Export")
+            .small_button("EXPORT  ↓")
             .on_hover_text("Export as Markdown")
             .clicked()
         {
@@ -62,7 +64,7 @@ pub fn render(
         }
     });
 
-    let input_height = 72.0;
+    let input_height = 86.0;
     let remaining = ui.available_rect_before_wrap();
 
     let messages_rect = egui::Rect::from_min_size(
@@ -84,6 +86,7 @@ pub fn render(
         show_thinking,
         has_pending,
         editing.as_mut(),
+        motion,
     ) {
         action = thread_action;
     }
@@ -92,6 +95,14 @@ pub fn render(
     let input_rect = egui::Rect::from_min_size(
         egui::pos2(remaining.min.x, remaining.max.y - input_height),
         egui::vec2(remaining.width(), input_height),
+    );
+    ui.painter()
+        .rect_filled(input_rect, egui::CornerRadius::same(2), palette.surface);
+    ui.painter().rect_stroke(
+        input_rect,
+        egui::CornerRadius::same(2),
+        egui::Stroke::new(1.0, palette.border_strong),
+        egui::StrokeKind::Inside,
     );
     let mut input_ui = ui.new_child(
         egui::UiBuilder::new()
@@ -102,9 +113,11 @@ pub fn render(
 
     let send_enabled =
         !has_pending && (!state.input.trim().is_empty() || !state.draft_images.is_empty());
+    let send_width = 68.0;
+    let text_width = (input_ui.available_width() - send_width - 24.0).max(40.0);
     let text_edit = egui::TextEdit::multiline(&mut state.input)
         .desired_rows(2)
-        .desired_width(input_ui.available_width() - 90.0)
+        .desired_width(text_width)
         .hint_text(if has_pending {
             "Waiting for response…"
         } else {
@@ -125,19 +138,17 @@ pub fn render(
 
     input_ui.add_space(4.0);
     if has_pending {
-        if input_ui
-            .add(egui::Button::new("■ Stop").min_size(egui::vec2(64.0, 32.0)))
-            .clicked()
-        {
+        let stop_button =
+            crate::ui::theme::action_button(&input_ui, "■ STOP", crate::ui::theme::Tone::Danger)
+                .min_size(egui::vec2(74.0, 32.0));
+        if input_ui.add(stop_button).clicked() {
             action = ThreadAction::Cancel;
         }
     } else {
-        let send_clicked = input_ui
-            .add_enabled(
-                send_enabled,
-                egui::Button::new("Send").min_size(egui::vec2(64.0, 32.0)),
-            )
-            .clicked();
+        let send_button =
+            crate::ui::theme::action_button(&input_ui, "SEND  ↑", crate::ui::theme::Tone::Accent)
+                .min_size(egui::vec2(send_width, 30.0));
+        let send_clicked = input_ui.add_enabled(send_enabled, send_button).clicked();
 
         if (send_clicked || enter_pressed) && send_enabled {
             action = ThreadAction::Send;
@@ -194,6 +205,7 @@ fn render_messages(
     show_thinking: bool,
     has_pending: bool,
     mut editing: Option<&mut MessageEdit>,
+    motion: MotionPreference,
 ) -> Option<ThreadAction> {
     let mut action = None;
     let muted = tokens(ui).text_muted;
@@ -229,9 +241,15 @@ fn render_messages(
                         {
                             action = Some(edit_action);
                         }
-                    } else if let Some(msg_action) =
-                        render_message(ui, msg, idx, is_last_assistant, can_edit, !has_pending)
-                    {
+                    } else if let Some(msg_action) = render_message(
+                        ui,
+                        msg,
+                        idx,
+                        is_last_assistant,
+                        can_edit,
+                        !has_pending,
+                        motion,
+                    ) {
                         action = Some(msg_action);
                     }
                     ui.add_space(8.0);
@@ -239,7 +257,7 @@ fn render_messages(
             }
 
             if show_thinking {
-                render_thinking(ui);
+                render_thinking(ui, motion);
                 ui.add_space(8.0);
             }
         });
@@ -264,30 +282,30 @@ fn render_edit(ui: &mut egui::Ui, draft: &mut String) -> Option<ThreadAction> {
     action
 }
 
-fn render_thinking(ui: &mut egui::Ui) {
-    let phase = (ui.input(|i| i.time) * 4.0) as usize % 4;
+fn render_thinking(ui: &mut egui::Ui, motion: MotionPreference) {
+    let phase = if motion == MotionPreference::Reduced {
+        1
+    } else {
+        (crate::ui::theme::motion_progress(ui.input(|i| i.time), motion, 0.6) * 4.0).floor()
+            as usize
+    };
     let dots = ".".repeat(phase);
     let text = format!("Thinking{}", dots);
     let palette = tokens(ui);
 
     ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
         let max_width = ui.available_width() * 0.75;
-        egui::Frame::group(ui.style())
-            .fill(palette.bubble_assistant)
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_max_width(max_width);
-                ui.label(
-                    egui::RichText::new(text)
-                        .italics()
-                        .color(palette.text_muted),
-                );
-            });
+        crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Active).show(ui, |ui| {
+            ui.set_max_width(max_width);
+            ui.label(
+                egui::RichText::new(text)
+                    .italics()
+                    .color(palette.text_muted),
+            );
+        });
     });
 
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(120));
+    crate::ui::theme::request_motion_repaint(ui, motion);
 }
 
 fn render_message(
@@ -297,15 +315,20 @@ fn render_message(
     can_regenerate: bool,
     can_edit: bool,
     enabled: bool,
+    motion: MotionPreference,
 ) -> Option<ThreadAction> {
     let is_user = matches!(msg.role, Role::User);
     let palette = tokens(ui);
 
     let alpha = if is_user {
         255u8
-    } else if let Some(appeared_at) = msg.appeared_at {
-        let t = appeared_at.elapsed().as_secs_f32() / FADE_DURATION.as_secs_f32();
-        (t.clamp(0.0, 1.0) * 255.0) as u8
+    } else if motion == MotionPreference::Full {
+        if let Some(appeared_at) = msg.appeared_at {
+            let t = appeared_at.elapsed().as_secs_f32() / FADE_DURATION.as_secs_f32();
+            (t.clamp(0.0, 1.0) * 255.0) as u8
+        } else {
+            255u8
+        }
     } else {
         255u8
     };
@@ -334,49 +357,52 @@ fn render_message(
     let mut action = None;
     ui.with_layout(layout, |ui| {
         let max_width = ui.available_width() * 0.75;
-        let inner = egui::Frame::group(ui.style())
-            .fill(bubble_color)
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_max_width(max_width);
+        let inner = crate::ui::theme::panel_toned(
+            ui,
+            if is_user {
+                crate::ui::theme::Tone::Accent
+            } else {
+                crate::ui::theme::Tone::Neutral
+            },
+        )
+        .fill(bubble_color)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_max_width(max_width);
 
-                if is_user {
-                    if !msg.content.is_empty() {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&msg.content).color(text_color))
-                                .wrap(),
-                        );
-                    }
-                    for image in &msg.images {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "🖼 image {}×{}",
-                                image.width, image.height
-                            ))
+            if is_user {
+                if !msg.content.is_empty() {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&msg.content).color(text_color))
+                            .wrap(),
+                    );
+                }
+                for image in &msg.images {
+                    ui.label(
+                        egui::RichText::new(format!("🖼 image {}×{}", image.width, image.height))
                             .small()
                             .color(text_color),
-                        );
-                    }
-                } else if msg.content.is_empty() && !msg.interrupted {
+                    );
+                }
+            } else if msg.content.is_empty() && !msg.interrupted {
+                ui.label(
+                    egui::RichText::new("Thinking…")
+                        .italics()
+                        .color(with_alpha(palette.text_muted, alpha)),
+                );
+            } else {
+                render_markdown_with_copy(ui, &msg.content, text_color, &mut action);
+                if msg.interrupted {
+                    ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new("Thinking…")
+                        egui::RichText::new("Interrupted")
                             .italics()
+                            .small()
                             .color(with_alpha(palette.text_muted, alpha)),
                     );
-                } else {
-                    render_markdown_with_copy(ui, &msg.content, text_color, &mut action);
-                    if msg.interrupted {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new("Interrupted")
-                                .italics()
-                                .small()
-                                .color(with_alpha(palette.text_muted, alpha)),
-                        );
-                    }
                 }
-            });
+            }
+        });
 
         if let Some(hover) = message_actions::hover_bar(
             ui,
@@ -427,9 +453,7 @@ fn render_markdown_with_copy(
             MdPart::Text(_) => {}
             MdPart::Code { lang, body } => {
                 let palette = tokens(ui);
-                egui::Frame::group(ui.style())
-                    .fill(palette.surface)
-                    .stroke(egui::Stroke::new(1.0, palette.border))
+                crate::ui::theme::panel(ui)
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {

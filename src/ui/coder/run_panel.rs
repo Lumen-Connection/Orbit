@@ -21,7 +21,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         };
 
         if let Some(pending) = &state.coder.run_restart_prompt {
-            egui::Frame::group(ui.style())
+            crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Warning)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(format!(
@@ -29,10 +29,20 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                         pending.name
                     ));
                     ui.horizontal(|ui| {
-                        if ui.button("Restart").clicked() {
+                        let restart_button = crate::ui::theme::action_button(
+                            ui,
+                            "RESTART",
+                            crate::ui::theme::Tone::Warning,
+                        );
+                        if ui.add(restart_button).clicked() {
                             confirm_restart = true;
                         }
-                        if ui.button("Back").clicked() {
+                        let back_button = crate::ui::theme::action_button(
+                            ui,
+                            "BACK",
+                            crate::ui::theme::Tone::Neutral,
+                        );
+                        if ui.add(back_button).clicked() {
                             decline_restart = true;
                         }
                     });
@@ -41,7 +51,13 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         }
 
         ui.horizontal(|ui| {
-            ui.heading("Run");
+            ui.label(
+                egui::RichText::new("RUN // PROCESS BAY")
+                    .small()
+                    .strong()
+                    .monospace()
+                    .color(crate::ui::theme::tokens(ui).text_muted),
+            );
             ui.add_space(8.0);
             let runner = state.coder.runner.lock().ok();
             let mut ids: Vec<String> = runner
@@ -142,7 +158,9 @@ fn render_configs(ui: &mut egui::Ui, state: &crate::app::MainState, play: &mut O
     {
         ui.horizontal(|ui| {
             ui.label(&config.name);
-            if ui.small_button("▶").on_hover_text("Start").clicked() {
+            let start_button =
+                crate::ui::theme::action_button(ui, "▶", crate::ui::theme::Tone::Success).small();
+            if ui.add(start_button).on_hover_text("Start").clicked() {
                 *play = Some(config.id.clone());
             }
         });
@@ -175,17 +193,27 @@ fn render_process_header(
             proc.status,
             ProcessStatus::Running | ProcessStatus::Starting
         ) {
-            if ui.small_button("■").on_hover_text("Stop").clicked() {
+            let stop_button =
+                crate::ui::theme::action_button(ui, "■", crate::ui::theme::Tone::Danger).small();
+            if ui.add(stop_button).on_hover_text("Stop").clicked() {
                 *stop = Some(proc.config_id.clone());
             }
-        } else if ui.small_button("▶").on_hover_text("Start").clicked() {
-            // replay last config id
-            *stop = None;
+        } else {
+            let start_button =
+                crate::ui::theme::action_button(ui, "▶", crate::ui::theme::Tone::Success).small();
+            if ui.add(start_button).on_hover_text("Start").clicked() {
+                // replay last config id
+                *stop = None;
+            }
         }
-        if ui.small_button("↻").on_hover_text("Restart").clicked() {
+        let restart_button =
+            crate::ui::theme::action_button(ui, "↻", crate::ui::theme::Tone::Warning).small();
+        if ui.add(restart_button).on_hover_text("Restart").clicked() {
             *restart = Some(proc.config_id.clone());
         }
-        if ui.small_button("Clear").clicked() {
+        let clear_button =
+            crate::ui::theme::action_button(ui, "CLEAR", crate::ui::theme::Tone::Neutral).small();
+        if ui.add(clear_button).clicked() {
             *clear = Some(proc.config_id.clone());
         }
     });

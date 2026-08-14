@@ -6,7 +6,13 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     let mut switch = false;
     let mut close = false;
     ui.horizontal(|ui| {
-        ui.heading("Explorer");
+        ui.label(
+            egui::RichText::new("EXPLORER // PROJECT TREE")
+                .small()
+                .strong()
+                .monospace()
+                .color(crate::ui::theme::tokens(ui).text_muted),
+        );
         let Screen::Main(state) = &app.screen else {
             return;
         };
@@ -22,22 +28,29 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     .color(crate::ui::theme::tokens(ui).text_muted),
             );
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("Close")
-                .on_hover_text("Close project")
-                .clicked()
-            {
-                close = true;
-            }
-            if ui
-                .small_button("Switch…")
-                .on_hover_text("Open another project")
-                .clicked()
-            {
-                switch = true;
-            }
-        });
+    });
+    ui.add_space(4.0);
+    // Keep project actions on their own compact line so they cannot cover the
+    // Explorer title or consume the space reserved for the project tree.
+    ui.horizontal(|ui| {
+        let switch_button =
+            crate::ui::theme::action_button(ui, "SWITCH…", crate::ui::theme::Tone::Neutral).small();
+        if ui
+            .add(switch_button)
+            .on_hover_text("Open another project")
+            .clicked()
+        {
+            switch = true;
+        }
+        let close_button =
+            crate::ui::theme::action_button(ui, "CLOSE", crate::ui::theme::Tone::Danger).small();
+        if ui
+            .add(close_button)
+            .on_hover_text("Close project")
+            .clicked()
+        {
+            close = true;
+        }
     });
     if close {
         app.request_close_project();

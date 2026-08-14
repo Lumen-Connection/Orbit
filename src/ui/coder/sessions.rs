@@ -39,7 +39,9 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
 
         if state.coder.restore_rx.is_some() {
             ui.horizontal(|ui| {
-                ui.spinner();
+                if state.settings.motion == crate::storage::MotionPreference::Full {
+                    ui.spinner();
+                }
                 ui.label(
                     egui::RichText::new("Restoring sessions…")
                         .italics()
@@ -50,16 +52,28 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         }
 
         ui.horizontal(|ui| {
-            ui.heading("Sessions");
+            ui.label(
+                egui::RichText::new("SESSIONS // AGENT CHANNELS")
+                    .small()
+                    .strong()
+                    .monospace()
+                    .color(palette.text_muted),
+            );
+            let export_button =
+                crate::ui::theme::action_button(ui, "EXPORT", crate::ui::theme::Tone::Neutral)
+                    .small();
             if ui
-                .small_button("Export")
+                .add(export_button)
                 .on_hover_text("Export as Markdown")
                 .clicked()
             {
                 export = true;
             }
+            let add_button =
+                crate::ui::theme::action_button(ui, "+ NEW", crate::ui::theme::Tone::Accent)
+                    .small();
             let add = ui
-                .add_enabled(allowed, egui::Button::new("+").small())
+                .add_enabled(allowed, add_button)
                 .on_hover_text("New session")
                 .on_disabled_hover_text(
                     "Configure an API key in Settings before creating a session.",
@@ -67,7 +81,13 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             if add.clicked() {
                 create = true;
             }
-            if !allowed && ui.small_button("Configure key").clicked() {
+            let configure_button = crate::ui::theme::action_button(
+                ui,
+                "CONFIGURE KEY",
+                crate::ui::theme::Tone::Warning,
+            )
+            .small();
+            if !allowed && ui.add(configure_button).clicked() {
                 open_settings = true;
             }
         });
@@ -93,7 +113,12 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                 .color(palette.text_muted),
             );
             ui.add_space(10.0);
-            if ui.button("Configure key").clicked() {
+            let configure_button = crate::ui::theme::action_button(
+                ui,
+                "CONFIGURE KEY",
+                crate::ui::theme::Tone::Warning,
+            );
+            if ui.add(configure_button).clicked() {
                 open_settings = true;
             }
         }
@@ -139,7 +164,9 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if let Some(live) = state.coder.sessions.active() {
                 if live.busy {
-                    ui.spinner();
+                    if state.settings.motion == crate::storage::MotionPreference::Full {
+                        ui.spinner();
+                    }
                     if let Some(hint) = &live.retry_hint {
                         ui.colored_label(palette.warning, hint);
                     } else {
@@ -195,7 +222,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         if let Some(live) = state.coder.sessions.active()
             && let Some((spent, cap)) = live.budget_prompt
         {
-            egui::Frame::group(ui.style())
+            crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Warning)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(
@@ -205,10 +232,20 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                         .color(palette.warning),
                     );
                     ui.horizontal(|ui| {
-                        if ui.button(format!("Raise to ${:.2}", cap + 2.0)).clicked() {
+                        let raise_button = crate::ui::theme::action_button(
+                            ui,
+                            format!("RAISE TO ${:.2}", cap + 2.0),
+                            crate::ui::theme::Tone::Warning,
+                        );
+                        if ui.add(raise_button).clicked() {
                             raise_budget = Some(cap + 2.0);
                         }
-                        if ui.button("Stop").clicked() {
+                        let stop_button = crate::ui::theme::action_button(
+                            ui,
+                            "STOP",
+                            crate::ui::theme::Tone::Danger,
+                        );
+                        if ui.add(stop_button).clicked() {
                             decline_budget = true;
                         }
                     });
@@ -221,7 +258,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             && let Some(handoff) = &live.handoff
             && handoff.is_interesting()
         {
-            egui::Frame::group(ui.style())
+            crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Active)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -240,9 +277,12 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(6.0);
         }
 
-        let input_height = 72.0;
+        // Reserve the full framed dispatch-console height. The previous 86 px
+        // reservation let the panel extend into the Run // Process Bay at
+        // compact window heights.
+        let input_height = 112.0;
         let avail = ui.available_size();
-        let thread_h = (avail.y - input_height).max(80.0);
+        let thread_h = (avail.y - input_height).max(0.0);
         let mut edit_draft = state.editing_coder.clone();
 
         egui::ScrollArea::vertical()
@@ -360,59 +400,77 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         state.draft_images.extend(captured);
         crate::ui::attachments::draft_strip(ui, &mut state.draft_images, &mut state.lightbox);
         crate::ui::attachments::lightbox_window(ui.ctx(), &mut state.lightbox);
-        ui.horizontal(|ui| {
-            let Some(live) = state.coder.sessions.active_mut() else {
-                return;
-            };
-            let busy = live.busy;
-            let mut response = ui.add_enabled(
-                !busy && allowed,
-                egui::TextEdit::multiline(&mut live.input)
-                    .desired_rows(2)
-                    .desired_width(ui.available_width() - 90.0)
-                    .hint_text(if !allowed {
-                        "Configure an API key to send…"
-                    } else if busy {
-                        "Agent is working…"
-                    } else {
-                        "Ask the agent… (Enter to send)"
-                    }),
+        crate::ui::theme::panel(ui).show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("DISPATCH CONSOLE")
+                    .small()
+                    .strong()
+                    .monospace()
+                    .color(palette.accent),
             );
-            if !allowed {
-                response = response.on_disabled_hover_text(
-                    "Sessions are read-only until an API key is configured.",
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let Some(live) = state.coder.sessions.active_mut() else {
+                    return;
+                };
+                let busy = live.busy;
+                let send_width = 68.0;
+                let text_width = (ui.available_width() - send_width - 12.0).max(40.0);
+                let mut response = ui.add_enabled(
+                    !busy && allowed,
+                    egui::TextEdit::multiline(&mut live.input)
+                        .desired_rows(2)
+                        .desired_width(text_width)
+                        .hint_text(if !allowed {
+                            "Configure an API key to send…"
+                        } else if busy {
+                            "Agent is working…"
+                        } else {
+                            "Ask the agent… (Enter to send)"
+                        }),
                 );
-            }
-            let enter = allowed
-                && response.has_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-            if busy {
-                if ui
-                    .add(egui::Button::new("■ Stop").min_size(egui::vec2(64.0, 32.0)))
-                    .clicked()
-                {
-                    cancel = true;
+                if !allowed {
+                    response = response.on_disabled_hover_text(
+                        "Sessions are read-only until an API key is configured.",
+                    );
                 }
-            } else {
-                let can_send =
-                    allowed && (!live.input.trim().is_empty() || !state.draft_images.is_empty());
-                if (ui
-                    .add_enabled(
-                        can_send,
-                        egui::Button::new("Send").min_size(egui::vec2(64.0, 32.0)),
+                let enter = allowed
+                    && response.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                if busy {
+                    let stop_button = crate::ui::theme::action_button(
+                        ui,
+                        "■ STOP",
+                        crate::ui::theme::Tone::Danger,
                     )
-                    .on_disabled_hover_text(if !allowed {
-                        "Configure an API key in Settings to send."
-                    } else {
-                        "Type a message first."
-                    })
-                    .clicked()
-                    || enter)
-                    && can_send
-                {
-                    send = true;
+                    .min_size(egui::vec2(74.0, 32.0));
+                    if ui.add(stop_button).clicked() {
+                        cancel = true;
+                    }
+                } else {
+                    let can_send = allowed
+                        && (!live.input.trim().is_empty() || !state.draft_images.is_empty());
+                    let send_button = crate::ui::theme::action_button(
+                        ui,
+                        "SEND  ↑",
+                        crate::ui::theme::Tone::Accent,
+                    )
+                    .min_size(egui::vec2(send_width, 30.0));
+                    if (ui
+                        .add_enabled(can_send, send_button)
+                        .on_disabled_hover_text(if !allowed {
+                            "Configure an API key in Settings to send."
+                        } else {
+                            "Type a message first."
+                        })
+                        .clicked()
+                        || enter)
+                        && can_send
+                    {
+                        send = true;
+                    }
                 }
-            }
+            });
         });
     }
 
@@ -605,17 +663,33 @@ fn bubble(
     let palette = crate::ui::theme::tokens(ui);
     ui.add_space(8.0);
     ui.label(
-        egui::RichText::new(who)
+        egui::RichText::new(format!("{} // TRANSCRIPT", who.to_uppercase()))
             .small()
             .strong()
-            .color(palette.text_muted),
+            .monospace()
+            .color(if error {
+                palette.danger
+            } else {
+                palette.text_muted
+            }),
     );
     let color = if error {
         palette.danger
     } else {
         palette.text_primary
     };
-    let inner = ui.label(egui::RichText::new(text).color(color));
+    let inner = crate::ui::theme::panel_toned(
+        ui,
+        if error {
+            crate::ui::theme::Tone::Danger
+        } else if who == "You" {
+            crate::ui::theme::Tone::Accent
+        } else {
+            crate::ui::theme::Tone::Neutral
+        },
+    )
+    .show(ui, |ui| ui.label(egui::RichText::new(text).color(color)))
+    .response;
     crate::ui::message_actions::hover_bar(ui, inner.hovered(), can_regen, can_edit, enabled)
 }
 
@@ -646,12 +720,24 @@ fn render_tool_row(
     } else {
         palette.text_muted
     };
-    let clicked = ui
-        .add(
+    let clicked = crate::ui::theme::panel_toned(
+        ui,
+        if is_error {
+            crate::ui::theme::Tone::Danger
+        } else if running {
+            crate::ui::theme::Tone::Active
+        } else {
+            crate::ui::theme::Tone::Neutral
+        },
+    )
+    .show(ui, |ui| {
+        ui.add(
             egui::Label::new(egui::RichText::new(header).color(color).monospace())
                 .sense(egui::Sense::click()),
         )
-        .clicked();
+        .clicked()
+    })
+    .inner;
     if running {
         ui.horizontal(|ui| {
             ui.spinner();

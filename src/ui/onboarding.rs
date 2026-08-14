@@ -5,17 +5,23 @@ use eframe::egui;
 pub fn render(app: &mut App, ui: &mut egui::Ui) {
     egui::CentralPanel::default().show(ui, |ui| {
         ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
+            ui.add_space(64.0);
 
-            ui.heading("Welcome to Orbit");
+            ui.label(
+                egui::RichText::new("ORBIT // INITIAL LINK")
+                    .size(26.0)
+                    .strong()
+                    .monospace()
+                    .color(crate::ui::theme::tokens(ui).text_primary),
+            );
             ui.add_space(6.0);
             ui.label(
-                egui::RichText::new("Connect your OpenRouter API key to get started.")
+                egui::RichText::new("Connect an OpenRouter key to open the operations console.")
                     .color(crate::ui::theme::tokens(ui).text_muted),
             );
             ui.add_space(28.0);
 
-            egui::Frame::group(ui.style())
+            crate::ui::theme::panel_toned(ui, crate::ui::theme::Tone::Accent)
                 .inner_margin(egui::Margin::same(20))
                 .show(ui, |ui| {
                     ui.set_max_width(440.0);
@@ -24,7 +30,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                         return;
                     };
 
-                    ui.label("OpenRouter API key");
+                    crate::ui::theme::section_header(ui, "CREDENTIAL LINK");
                     ui.add_space(4.0);
 
                     let response = ui.add(
@@ -36,7 +42,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
 
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut state.show_key, "Show key");
+                        ui.checkbox(&mut state.show_key, "SHOW KEY");
                         ui.add_space(8.0);
                         ui.hyperlink_to("Get a key", "https://openrouter.ai/keys");
                     });
@@ -48,11 +54,15 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     let submit_clicked = ui
                         .add_enabled(
                             !validating,
-                            egui::Button::new(if validating {
-                                "Validating…"
-                            } else {
-                                "Continue"
-                            })
+                            crate::ui::theme::action_button(
+                                ui,
+                                if validating {
+                                    "Validating…"
+                                } else {
+                                    "CONTINUE"
+                                },
+                                crate::ui::theme::Tone::Accent,
+                            )
                             .min_size(egui::vec2(120.0, 32.0)),
                         )
                         .clicked();

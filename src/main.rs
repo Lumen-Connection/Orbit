@@ -153,6 +153,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Orbit",
         native_options,
-        Box::new(|_cc| Ok(Box::new(OpenChatApp::boot()))),
+        Box::new(|cc| {
+            crate::ui::theme::install_fonts(&cc.egui_ctx);
+            Ok(Box::new(OpenChatApp::boot()))
+        }),
     )
 }
