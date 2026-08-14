@@ -80,6 +80,11 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSchema>,
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
+    /// The number of leading chars of `system` that compose the stable,
+    /// cacheable prefix (base prompt + role fragment). The trailing portion
+    /// (e.g. the per-turn digest) is left out of the prompt-cache. 0 = no
+    /// explicit caching marker.
+    pub system_cache_chars: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -41,6 +41,8 @@ fn files_of(args: &serde_json::Value) -> Vec<String> {
 pub struct RecordDecision;
 pub struct AddFinding;
 pub struct UpdateTask;
+pub struct RecordPlan;
+pub struct ApproveStage;
 
 #[async_trait]
 impl Tool for RecordDecision {
@@ -83,6 +85,7 @@ impl Tool for RecordDecision {
             at: Utc::now(),
             model: ctx.session_model.clone(),
             session: ctx.session_label.clone(),
+            role: ctx.session_role.label().to_string(),
             decision: decision.clone(),
             rationale,
             files: files_of(&args),
@@ -137,6 +140,7 @@ impl Tool for AddFinding {
             at: Utc::now(),
             model: ctx.session_model.clone(),
             session: ctx.session_label.clone(),
+            role: ctx.session_role.label().to_string(),
             description: description.clone(),
             severity,
             location,
@@ -200,6 +204,283 @@ impl Tool for UpdateTask {
     }
 }
 
+#[async_trait]
+impl Tool for RecordPlan {
+    fn name(&self) -> &'static str {
+        "record_plan"
+    }
+    fn description(&self) -> &'static str {
+        "Write the Planner stage artifact: tasks, architectural decision, \
+         acceptance criteria, scope and non-goals. Acceptance criteria become \
+         immutable. Architect/Planner only."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "decision": { "type": "string" },
+                "scope": { "type": "string" },
+                "non_goals": { "type": "string" },
+                "tasks": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "acceptance_criteria": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "text": { "type": "string" }
+                        },
+                        "required": ["id", "text"]
+                    }
+                }
+            },
+            "required": ["decision"]
+        })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutcome, ToolError> {
+        if ctx.session_role != crate::session::AgentRole::Architect {
+            return Err(ToolError::Message(
+                "record_plan is only available to the Planner (Architect).".into(),
+            ));
+        }
+        let root = ctx
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Message("no project is open".into()))?;
+        let store = crate::pipeline::contract::ContractStore::open(&root.canonical_root);
+        if store
+            .planner()
+            .map_err(ToolError::Message)?
+            .is_some_and(|p| !p.acceptance_criteria.is_empty())
+        {
+            return Err(ToolError::Message(
+                "acceptance criteria are immutable after the Planner writes them".into(),
+            ));
+        }
+        let decision = arg_str(&args, "decision")?.to_string();
+        let scope = args
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let non_goals = args
+            .get("non_goals")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let tasks: Vec<String> = args
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let acceptance_criteria = args
+            .get("acceptance_criteria")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| {
+                        Some(crate::pipeline::contract::AcceptanceCriterion {
+                            id: v.get("id")?.as_str()?.to_string(),
+                            text: v.get("text")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let output = crate::pipeline::contract::PlannerOutput {
+            tasks: tasks.clone(),
+            decision: decision.clone(),
+            acceptance_criteria,
+            scope,
+            non_goals,
+        };
+        store.write_planner(&output).map_err(ToolError::Message)?;
+        {
+            let mut ctx_store = store_of(ctx)?;
+            ctx_store
+                .append_decision(Decision {
+                    at: Utc::now(),
+                    model: ctx.session_model.clone(),
+                    session: ctx.session_label.clone(),
+                    role: ctx.session_role.label().to_string(),
+                    decision: decision.clone(),
+                    rationale: "Planner approach".into(),
+                    files: Vec::new(),
+                    pinned: true,
+                })
+                .map_err(ToolError::Message)?;
+            for task in &tasks {
+                ctx_store
+                    .upsert_task(None, TaskStatus::Open, task.clone())
+                    .map_err(ToolError::Message)?;
+            }
+        }
+        Ok(truncate_output(format!(
+            "Recorded plan with {} task(s) and {} acceptance criteria.",
+            output.tasks.len(),
+            output.acceptance_criteria.len()
+        )))
+    }
+}
+
+#[async_trait]
+impl Tool for ApproveStage {
+    fn name(&self) -> &'static str {
+        "approve_stage"
+    }
+    fn description(&self) -> &'static str {
+        "Write the Reviewer verdict: pass or fail, plus per-acceptance-criterion status. \
+         The orchestrator reads this structured record; do not use record_decision for this."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verdict": { "type": "string" },
+                "commit_message": { "type": "string" },
+                "findings": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "required_fixes": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "ac_status": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "status": { "type": "string" },
+                            "detail": { "type": "string" }
+                        },
+                        "required": ["id", "status"]
+                    }
+                }
+            },
+            "required": ["verdict"]
+        })
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutcome, ToolError> {
+        if ctx.session_role != crate::session::AgentRole::Reviewer {
+            return Err(ToolError::Message(
+                "approve_stage is only available to the Reviewer.".into(),
+            ));
+        }
+        let root = ctx
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Message("no project is open".into()))?;
+        let verdict = args
+            .get("verdict")
+            .and_then(|v| v.as_str())
+            .and_then(crate::pipeline::contract::ReviewVerdict::parse)
+            .ok_or_else(|| ToolError::InvalidArgs("verdict must be pass or fail".into()))?;
+        let ac_status = args
+            .get("ac_status")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| {
+                        let id = v.get("id")?.as_str()?.to_string();
+                        let status = v.get("status")?.as_str()?;
+                        let check = if status.eq_ignore_ascii_case("ok")
+                            || status.eq_ignore_ascii_case("pass")
+                        {
+                            crate::pipeline::contract::AcCheck::Ok
+                        } else {
+                            crate::pipeline::contract::AcCheck::Failed {
+                                detail: v
+                                    .get("detail")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            }
+                        };
+                        Some(crate::pipeline::contract::AcStatus { id, check })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let findings = string_list(&args, "findings");
+        let required_fixes = string_list(&args, "required_fixes");
+        let commit_message = args
+            .get("commit_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let output = crate::pipeline::contract::ReviewerOutput {
+            verdict,
+            ac_status,
+            findings: findings.clone(),
+            required_fixes,
+            commit_message,
+        };
+        crate::pipeline::contract::ContractStore::open(&root.canonical_root)
+            .write_reviewer(&output)
+            .map_err(ToolError::Message)?;
+        if !findings.is_empty() {
+            let mut ctx_store = store_of(ctx)?;
+            for finding in findings {
+                ctx_store
+                    .append_finding(crate::context::store::Finding {
+                        at: Utc::now(),
+                        model: ctx.session_model.clone(),
+                        session: ctx.session_label.clone(),
+                        role: ctx.session_role.label().to_string(),
+                        description: finding,
+                        severity: "review".into(),
+                        location: None,
+                    })
+                    .map_err(ToolError::Message)?;
+            }
+        }
+        Ok(truncate_output(format!(
+            "Stage verdict recorded: {:?}",
+            output.verdict
+        )))
+    }
+}
+
+fn string_list(args: &serde_json::Value, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +510,7 @@ mod tests {
             store: Some(store),
             session_label: "architecture".into(),
             session_model: "claude-opus-5".into(),
+            session_role: crate::session::AgentRole::Coder,
             runner: None,
             run_configs: None,
             run_starts: None,
@@ -263,5 +545,62 @@ mod tests {
         assert!(text.contains("Use JWT with refresh tokens."));
         assert!(text.contains("2026-") || text.contains("20"));
         assert!(text.contains("**Decision:**"));
+    }
+
+    #[tokio::test]
+    async fn record_plan_writes_contract_and_coder_cannot_overwrite_acs() {
+        let (_tmp, mut ctx) = fixture();
+        ctx.session_role = crate::session::AgentRole::Architect;
+        RecordPlan
+            .execute(
+                serde_json::json!({
+                    "decision": "Keep the digest.",
+                    "scope": "context",
+                    "non_goals": "new files",
+                    "tasks": ["emit ACs"],
+                    "acceptance_criteria": [{"id": "AC1", "text": "digest shows tasks"}]
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        ctx.session_role = crate::session::AgentRole::Coder;
+        let err = RecordPlan
+            .execute(serde_json::json!({ "decision": "changed" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Architect") || err.to_string().contains("immutable"));
+    }
+
+    #[tokio::test]
+    async fn approve_stage_writes_structured_verdict() {
+        let (_tmp, mut ctx) = fixture();
+        ctx.session_role = crate::session::AgentRole::Reviewer;
+        ApproveStage
+            .execute(
+                serde_json::json!({
+                    "verdict": "fail",
+                    "ac_status": [{"id": "AC1", "status": "fail", "detail": "missing test"}],
+                    "findings": ["no coverage"],
+                    "commit_message": ""
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let review = crate::pipeline::contract::ContractStore::open(
+            &ctx.project.as_ref().unwrap().canonical_root,
+        )
+        .reviewer()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            review.verdict,
+            crate::pipeline::contract::ReviewVerdict::Fail
+        );
+        assert!(matches!(
+            review.ac_status[0].check,
+            crate::pipeline::contract::AcCheck::Failed { .. }
+        ));
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::providers::{ChatMessage, TokenUsage, ToolCall};
 use crate::session::SessionId;
+use crate::session::roles::AgentRole;
 use crate::workspace::{FilePatch, PatchStatus, Project};
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -15,6 +16,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (2, include_str!("../../migrations/0002_context_summary.sql")),
     (3, include_str!("../../migrations/0003_project_hidden.sql")),
     (4, include_str!("../../migrations/0004_history_fts.sql")),
+    (5, include_str!("../../migrations/0005_session_role.sql")),
 ];
 
 #[derive(Clone)]
@@ -28,6 +30,7 @@ pub struct StoredSession {
     pub id: String,
     pub label: String,
     pub model_id: String,
+    pub role: AgentRole,
     #[allow(dead_code)]
     pub last_active_at: String,
 }
@@ -181,6 +184,10 @@ impl Db {
         })
     }
 
+    /// Insert or update a session row, defaulting the role to Coder. Production
+    /// call sites pass an explicit role via `upsert_session_with_role`; this
+    /// convenience is kept for callers that do not track a role.
+    #[allow(dead_code)]
     pub fn upsert_session(
         &self,
         project_id: &str,
@@ -188,16 +195,30 @@ impl Db {
         label: &str,
         model: &str,
     ) -> Result<()> {
+        self.upsert_session_with_role(project_id, id, label, model, AgentRole::Coder.id())
+    }
+
+    /// Insert or update a session row, recording its agent role so it
+    /// survives a restart. Callers that know a session's role should use this.
+    pub fn upsert_session_with_role(
+        &self,
+        project_id: &str,
+        id: &SessionId,
+        label: &str,
+        model: &str,
+        role: &str,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO session (id, project_id, label, model_id, created_at, last_active_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                "INSERT INTO session (id, project_id, label, model_id, role, created_at, last_active_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
                  ON CONFLICT(id) DO UPDATE SET
                     label = excluded.label,
                     model_id = excluded.model_id,
+                    role = excluded.role,
                     last_active_at = excluded.last_active_at",
-                params![id.as_str(), project_id, label, model, now],
+                params![id.as_str(), project_id, label, model, role, now],
             )?;
             Ok(())
         })
@@ -515,7 +536,7 @@ impl Db {
     pub fn load_sessions(&self, project_id: &str) -> Result<Vec<StoredSession>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, label, model_id, last_active_at FROM session
+                "SELECT id, label, model_id, COALESCE(role, 'coder'), last_active_at FROM session
                  WHERE project_id = ?1 ORDER BY last_active_at DESC",
             )?;
             let rows = stmt.query_map(params![project_id], |row| {
@@ -523,7 +544,8 @@ impl Db {
                     id: row.get(0)?,
                     label: row.get(1)?,
                     model_id: row.get(2)?,
-                    last_active_at: row.get(3)?,
+                    role: AgentRole::from_id(&row.get::<_, String>(3)?),
+                    last_active_at: row.get(4)?,
                 })
             })?;
             let mut out = Vec::new();
@@ -787,6 +809,7 @@ mod tests {
     use super::{Db, estimate_cost};
     use crate::providers::{ChatMessage, TokenUsage};
     use crate::session::SessionId;
+    use crate::session::roles::AgentRole;
     use crate::workspace::{FilePatch, Project};
     use tempfile::TempDir;
 
@@ -812,7 +835,7 @@ mod tests {
             .with_conn(|conn| {
                 let n: i32 =
                     conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))?;
-                assert_eq!(n, 4);
+                assert_eq!(n, 5);
                 Ok(())
             })
             .unwrap();
@@ -848,6 +871,89 @@ mod tests {
             loaded[1],
             ChatMessage::Assistant { ref content, .. } if content == "hello"
         ));
+    }
+
+    #[test]
+    fn role_round_trips_through_persistence() {
+        let (_tmp, db, project) = db();
+        let id = SessionId::new("role-s1");
+        db.upsert_session_with_role(
+            &project.id,
+            &id,
+            "review",
+            "model-a",
+            AgentRole::Reviewer.id(),
+        )
+        .unwrap();
+        let loaded = db.load_sessions(&project.id).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].role, AgentRole::Reviewer);
+    }
+
+    #[test]
+    fn invalid_stored_role_degrades_to_coder() {
+        let (_tmp, db, project) = db();
+        let id = SessionId::new("role-s2");
+        db.upsert_session(&project.id, &id, "lab", "m").unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE session SET role = 'architector' WHERE id = ?1",
+                rusqlite::params![id.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let loaded = db.load_sessions(&project.id).unwrap();
+        assert_eq!(loaded[0].role, AgentRole::Coder);
+    }
+
+    #[test]
+    fn migrating_v4_database_backfills_old_sessions_to_coder() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("orbit.db");
+        // Simulate a v4 database: apply only the first four migrations.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(include_str!("../../migrations/0001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0002_context_summary.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0003_project_hidden.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0004_history_fts.sql"))
+            .unwrap();
+        for v in 1..=4 {
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                rusqlite::params![v, "2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO project (id, name, canonical_root, created_at, last_opened_at)
+             VALUES ('p1', 'legacy', 'C:/legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, label, model_id, created_at, last_active_at)
+             VALUES ('s-old', 'p1', 'legacy', 'm', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Reopen applies migration 5 automatically.
+        let db = Db::open_at(&path).unwrap();
+        db.with_conn(|conn| {
+            let role: String = conn
+                .query_row("SELECT role FROM session WHERE id = 's-old'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap_or_else(|_| "NULL".into());
+            assert_eq!(role, "coder");
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

@@ -1,9 +1,994 @@
-[commands]
-allowed = []
+[budget]
+session_usd = 2.0
+
+[[commands.allowed]]
+args = [
+    "build",
+    "--all-targets",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "--all-targets",
+    "migrating_v4_database_backfills_old_sessions_to_coder",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "fmt",
+    "--all",
+    "--check",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "fmt",
+    "--all",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "diff",
+    "--stat",
+]
+program = "git"
+
+[[commands.allowed]]
+args = [
+    "status",
+    "--short",
+]
+program = "git"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "--all-targets",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = ["Cargo.toml"]
+program = "cat"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    "const fs=require('fs');const p='PlanejamentoMelhoria.md';try{const s=fs.statSync(p);console.log('exists',s.size)}catch(e){console.log('not present')}",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const content = String.raw`# PlanejamentoMelhoria.md
+
+> **Base:** revisao linha-a-linha do codigo atual (pos R1-R7, triade verde, 173 testes).
+> Cada item cita localizacoes concretas (arquivo:linha). Nada aqui e especulacao --
+> tudo foi confirmado lendo o codigo.
+>
+> **Estado de partida:** cargo fmt OK - cargo clippy -D warnings OK - cargo test --all-targets OK 173/173.
+>
+> Documentos anteriores: PlanejamentoDefinitivo.md (arquitetura),
+> Tasks.md + Melhorias.md (backlog original, maiormente concluido),
+> melhoriaparte2.md (R1-R7, concluido).
+>
+> Este documento assume que o produto v1.0 ja existe e trata de torna-lo melhor --
+> mais barato, mais rapido, mais seguro e mais usavel -- sem refazer o que funciona.
+`;
+fs.writeFileSync('PlanejamentoMelhoria.md', content, 'utf8');
+console.log('seeded', content.length);""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+fs.writeFileSync('PlanejamentoMelhoria.md', String.raw`# PlanejamentoMelhoria.md
+
+> Base: revisao linha-a-linha do codigo atual (pos R1-R7, triade verde, 173 testes).
+> Cada item cita localizacoes concretas (arquivo:linha). Nada aqui e especulacao --
+> tudo foi confirmado lendo o codigo.
+>
+> Estado de partida: cargo fmt OK, cargo clippy -D warnings OK, cargo test --all-targets OK 173/173.
+>
+> Documentos anteriores: PlanejamentoDefinitivo.md (arquitetura),
+> Tasks.md + Melhorias.md (backlog original, maiormente concluido),
+> melhoriaparte2.md (R1-R7, concluido).
+>
+> Este documento assume que o produto v1.0 ja existe e trata de torna-lo melhor --
+> mais barato, mais rapido, mais seguro e mais usavel -- sem refazer o que funciona.
+
+## Principios
+
+1. Escopo aditivo e cirurgico. Nenhuma tarefa reescreve um modulo inteiro. Cada uma
+   toca poucos arquivos e deixa a triade verde.
+2. Cada tarefa e independente. As dependencias estao declaradas, mas dentro de cada
+   faixa a ordem numerica ja e topologicamente valida.
+3. Identificadores e comentarios em ingles; este documento em portugues.
+4. Cada tarefa termina com cargo fmt --all --check, cargo clippy --all-targets -- -D warnings,
+   cargo test --all-targets verdes.
+5. Legenda de esforco: P pequeno (< 2h), M medio (meio dia), G grande (1-3 dias).
+
+---
+
+# P0 -- Seguranca e armadilhas latentes
+
+Itens que nao quebram a triade hoje, mas representam risco real de seguranca ou de regressao
+silenciosa. Devem ser tratados antes de qualquer nova feature que dependa desses caminhos.
+
+### N0.1 -- Enforcement de papel no momento do dispatch (M)
+
+- Depende de: --
+- Arquivos: src/session/agent_loop.rs, src/tools/mod.rs, src/session/roles.rs
+- Problema: a fronteira de papel e somente no nivel do catalogo. ToolRegistry::for_role
+  (src/tools/mod.rs:388) filtra schemas() enviado ao modelo, mas dispatch_tool
+  (src/session/agent_loop.rs:255) resolve via deps.registry.get(&call.name) sem nenhuma
+  checagem de papel. Um Reviewer cujo turno somehow dispatchasse write_file executaria a escrita.
+  Isto ja esta anotado em finding, mas e o item de seguranca mais concreto do backlog.
+- Solucao: adicionar AgentRole::allowed_tools() como guarda em dispatch_tool, antes da
+  execucao. Recusar com ToolError::Message se a ferramenta nao estiver na lista do papel, e devolver
+  um ToolResult de erro claro ao modelo. Teste: uma TurnDeps com session_role: Reviewer e um
+  registry completo (workspace_tools()) -- uma chamada write_file e recusada no dispatch, nao
+  apenas omitida do catalogo.
+- Pronto quando: um teste prova que a recusa acontece no dispatch independentemente do registry;
+  o Reviewer continua recebendo o catalogo de 12; Coder e Tester continuam com 14.
+
+### N0.2 -- Remover a armadilha do state.coder.registry (P)
+
+- Depende de: --
+- Arquivos: src/coder.rs
+- Problema: reset_agent_session (src/coder.rs:1643) reatribui
+  state.coder.registry = Arc::new(ToolRegistry::workspace_tools()) (as 14 ferramentas) a cada
+  abertura de projeto. Esse campo nunca e usado para dispatch -- ambos os construtores de
+  TurnDeps (src/coder.rs:933 e src/coder.rs:1224) constroem um registry novo via
+  ToolRegistry::for_role(session_role). O campo e peso morto e armadilha: qualquer codigo futuro
+  que leia state.coder.registry diretamente bypassa a fronteira de papel.
+- Solucao: remover o campo registry de CoderState e a linha em reset_agent_session.
+  Confirmar com grep que nenhuma leitura resta. Se houver receio de remover, no minimo marcar
+  como deprecated e adicionar um comentario de que nunca deve ser usado para execucao, pois
+  TurnDeps constroi um registry por papel a cada turno.
+- Pronto quando: cargo test verde; grep por coder.registry em src/ retorna vazio ou
+  apenas o comentario de advertencia.
+
+### N0.3 -- Feedback ao trocar papel durante turno ativo (P)
+
+- Depende de: N0.1
+- Arquivos: src/coder.rs, src/ui/coder/sessions.rs
+- Problema: set_coder_role (src/coder.rs:1570) faz if live.busy { return; } -- troca de
+  papel e ignorada silenciosamente durante um turno. O combo box parece aceitar a escolha,
+  mas ela so vale no proximo turno. Defensavel (evita inconsistencia mid-turn), mas sem feedback.
+- Solucao: quando live.busy, nao aplicar mas desabilitar o combo box de papel durante
+  busy com on_disabled_hover_text explicando que a troca vale no proximo turno. Mais honesto
+  que aceitar e ignorar.
+- Pronto quando: durante um turno, o combo de papel esta desabilitado com hover explicativo;
+  ao terminar o turno, o combo volta habilitado e a troca aplica imediatamente.
+
+### N0.4 -- Populate cached_tokens to surface cache savings (M)
+
+- Depende de: --
+- Arquivos: src/providers/openrouter.rs, src/providers/mod.rs, src/ui/widgets/cost_meter.rs
+- Problema: TokenUsage.cached_tokens (src/providers/mod.rs:36) existe e e 0 por default.
+  No parser de stream (src/providers/openrouter.rs, StreamUsage e o mapeamento que monta
+  TokenUsage com cached_tokens: 0), o campo de cache do OpenRouter nao e desserializado --
+  e hardcoded 0. O OpenRouter devolve cached_tokens para modelos que suportam prompt caching.
+  Hoje pagamos tokens cheios em todo turno sem saber quantos foram cached.
+- Solucao: adicionar cached_tokens: Option<u32> ao StreamUsage; propagar para
+  TokenUsage.cached_tokens; exibir no medidor de custo (cached: N) para que o usuario veja a
+  economia. Nao altera o calculo de custo -- apenas torna visivel o que ja acontece se o
+  provider aplicar cache.
+- Pronto quando: um stream gravado com cached_tokens no bloco usage popula o campo;
+  estimate_cost continua correto; o medidor mostra cached: N quando aplicavel.
+
+### N0.5 -- Explicit prompt caching via cache marker (M)
+
+- Depende de: N0.4
+- Arquivos: src/providers/openrouter.rs, src/session/agent_loop.rs
+- Problema: o system prompt (instrucoes + digest do Project Context) e reenviado em todo
+  turno e e grande -- frequentemente 1 a 4k tokens. Para modelos que suportam prompt caching
+  (Anthropic via OpenRouter, e a marca cache_control), isso e desperdicio de custo. Hoje nao
+  ha nenhuma marca de cache.
+- Solucao: o OpenRouter aceita cache_control em mensagens system. Marcar o bloco do
+  system prompt como cacheavel. Como o digest muda a cada turno (decisoes recentes, mudancas
+  de outras sessoes), cachear o prefixo estavel (CODER_SYSTEM_PROMPT + role.prompt_fragment())
+  e deixar o digest fora do cache. Estruturar o system como array de partes com
+  cache_control do tipo ephemeral na parte estavel.
+- Cuidado: a forma exata da API do OpenRouter muda -- validar contra a documentacao atual
+  antes de implementar, e trazer um teste com wiremock que confirma que a marca e enviada.
+- Pronto quando: com um modelo que suporta cache, os turnos subsequentes mostram
+  cached_tokens > 0 no uso; o custo cai; o prefixo estavel e identico entre turnos (teste).
+`, 'utf8');
+console.log('wrote part 1 (intro + P0)');""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const path='PlanejamentoMelhoria.md';
+const existing=fs.readFileSync(path,'utf8');
+const part2=String.raw`
+---
+
+# P1 -- Alto ROI em custo, latencia e UX
+
+### N1.1 -- multi_edit tool for batch edits (G)
+
+- Depende de: N0.1
+- Arquivos: src/tools/fs.rs, src/tools/mod.rs, src/session/roles.rs
+- Problema: edit_file (src/tools/fs.rs:410) faz uma substituicao de snippet unico por
+  chamada. Um padrao comum e o agente precisar editar 3 a 5 pontos no mesmo arquivo. Hoje isso e
+  5 chamadas de ferramenta, 5 aprovacoes, 5 turnos de modelo -- latencia e custo multiplicados, e
+  fadiga de aprovacao.
+- Solucao: nova ferramenta multi_edit que aceita um path e um array de pares
+  {old_string, new_string}. Aplica todas as substituicoes sequencialmente sobre o mesmo conteudo
+  original, produzindo um unico FilePatch (uma aprovacao, um diff). Falha inteira se qualquer
+  snippet nao for encontrado ou nao for unico -- transacao atomica, sem meio-termo. ToolRisk::Mutating.
+  Adicionar multi_edit as listas de AgentRole::allowed_tools() para Coder e Tester (mesma
+  permissao de edit_file); Reviewer e Architect continuam sem.
+- Pronto quando: um teste edita 3 pontos num arquivo com uma chamada e um patch resultante;
+  um snippet ambiguo falha a operacao inteira sem aplicar nada; o catalogo do Reviewer nao inclui
+  multi_edit.
+
+### N1.2 -- grep with context lines (P)
+
+- Depende de: --
+- Arquivos: src/tools/fs.rs
+- Problema: grep (src/tools/fs.rs:185) retorna so a linha casada (rel:idx:line). Para
+  entender uma funcao, o agente quase sempre precisa das linhas ao redor -- e hoje faz um
+  read_file subsequente, um turno extra de modelo.
+- Solucao: adicionar parametro opcional context (inteiro, padrao 0) ao schema e a execucao,
+  emitindo context linhas antes e depois de cada match, prefixadas para contexto (como
+  grep -C). Manter o limite de 50 matches para conter a saida.
+- Pronto quando: grep com context: 3 mostra as 3 linhas ao redor de cada match; sem
+  context, comportamento inalterado; a saida total ainda e truncada em 30k chars.
+
+### N1.3 -- Coder Mode session search reusing FTS (M)
+
+- Depende de: --
+- Arquivos: src/ui/coder/sessions.rs, src/storage/db.rs
+- Problema: a migration 0004 criou history_fts e db.search_history (src/storage/db.rs)
+  ja existe e funciona (teste fts_finds_body_only_term passa). Mas a UI de busca so cobre Chat
+  Mode (planejado em M2.2). No Coder Mode, com 10+ sessoes por projeto, nao ha como achar uma
+  conversa antiga por conteudo.
+- Solucao: campo de busca no cabecalho de sessoes do Coder Mode, chamando
+  db.search_history (ja filtravel por source=session); ao selecionar um hit, ativar a
+  sessao correspondente e rolar ate o trecho. Reuso direto da infraestrutura FTS existente.
+- Pronto quando: buscar um termo presente so no corpo de uma sessao antiga a encontra em
+  menos de 200ms; clicar no resultado abre a sessao.
+
+### N1.4 -- Configurable cheaper summary model (M)
+
+- Depende de: --
+- Arquivos: src/session/agent_loop.rs, src/storage/settings.rs, src/context/store.rs
+- Problema: summarize_middle (src/session/agent_loop.rs) usa deps.session_model para
+  resumir o miolo da janela de contexto. Se a sessao usa um modelo de raciocinio caro (ex.:
+  Claude Opus), a sumarizacao tambem sai caro -- e ja e registrada como kind=summary
+  (insert_usage_kind), entao e mensuravel. Para um resumo, um modelo rapido/mais barato basta.
+- Solucao: adicionar summary_model opcional em config.toml na secao context.
+  Quando ausente, manter o comportamento atual (modelo da sessao). Quando presente, usar aquele
+  modelo para a chamada de sumarizacao. Documentar que o custo da sumarizacao ja e atribuido
+  corretamente.
+- Pronto quando: com summary_model definido, a sumarizacao usa aquele modelo; o medidor
+  mostra o custo separado; sem a config, comportamento inalterado.
+
+### N1.5 -- Preserve stdout/stderr order in run_command (M)
+
+- Depende de: --
+- Arquivos: src/tools/shell.rs
+- Problema: pump_reader para stdout e stderr rodam como tasks separadas
+  (src/tools/shell.rs:130) escrevendo num sink compartilhado sem ordem garantida. Erros de
+  build (stderr) podem aparecer antes ou depois das linhas de stdout relacionadas. Para diagnosticar
+  falhas, a ordem real importa.
+- Solucao: intercalar com timestamp de leitura. Cada chunk carrega um Instant; ordenar por
+  timestamp ao montar o relatorio final. Alternativa mais simples: ler stdout e stderr num unico
+  tokio::select que preserva a ordem de chegada. Avaliar o impacto no streaming incremental do
+  painel de terminal (nao quebrar o TerminalEvent::Chunk em tempo real).
+- Pronto quando: um comando que escreve out, err, out em ordem rapida produz um relatorio
+  cujas linhas refletem essa ordem.
+
+### N1.6 -- read_file detects binary instead of generic error (P)
+
+- Depende de: --
+- Arquivos: src/tools/fs.rs
+- Problema: read_file (src/tools/fs.rs:74) faz std::fs::read_to_string, que falha com
+  stream did not contain valid UTF-8 em arquivos binarios. O agente recebe um erro confuso em
+  vez de this is a binary file.
+- Solucao: ler como bytes; se houver byte nulo nos primeiros 8 KB, devolver
+  binary file, N bytes. Senao, converter para string e prosseguir com offset/limit como hoje.
+- Pronto quando: read_file numa png retorna a mensagem de binario em vez de erro UTF-8;
+  um rs continua lendo normalmente.
+`;
+fs.writeFileSync(path, existing + part2, 'utf8');
+console.log('appended part 2 (P1)');""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const path='PlanejamentoMelhoria.md';
+const existing=fs.readFileSync(path,'utf8');
+const part3=String.raw`
+---
+
+# P2 -- Polimento e nitidez
+
+### N2.1 -- Atalho de teclado para alternar Chat/Coder (P)
+
+- Depende de: --
+- Arquivos: src/ui/shortcuts.rs, src/ui/mod.rs
+- Problema: so existe alternancia por clique no seletor de modo. Num app operado por teclado,
+  trocar de modo sem mouse e friccao.
+- Solucao: Ctrl+Shift+M alterna entre Chat e Coder. Adicionar a tabela central de atalhos
+  (src/ui/shortcuts.rs) e a tela de configuracoes.
+- Pronto quando: o atalho funciona nos dois modos e aparece na lista de atalhos.
+
+### N2.2 -- Cost meter shows cache savings (P)
+
+- Depende de: N0.4
+- Arquivos: src/ui/widgets/cost_meter.rs
+- Problema: hoje mostra tokens e custo, mas nao a economia de cache -- o usuario nao ve que
+  esta pagando menos por causa do prompt caching.
+- Solucao: quando cached_tokens > 0, exibir cached: N e um custo efetivo que reflete a
+  tarifa de cache (se o provider a publicar). Honesto sobre o que e estimativa.
+- Pronto quando: com cache ativo, o medidor mostra os tokens cached e a diferenca.
+
+### N2.3 -- glob/grep cache the file walk (M)
+
+- Depende de: --
+- Arquivos: src/tools/fs.rs
+- Problema: grep e glob (src/tools/fs.rs:185, src/tools/fs.rs:249) fazem um WalkBuilder
+  completo a cada chamada. Num projeto de 10k arquivos, tres greps em sequencia re-caminham a
+  arvore tres vezes.
+- Solucao: cachear a lista de arquivos (paths relativos) na sessao/ToolContext com TTL curto
+  (ex.: invalida ao detectar mudanca via scanner ou apos N segundos). Reuso entre chamadas
+  no mesmo turno. Cuidado com invalidacao: se o agente acabou de escrever um arquivo, o cache
+  precisa incluir o novo.
+- Pronto quando: tres greps no mesmo turno usam uma unica travessia; apos uma escrita
+  aprovada, o cache invalida e o proximo grep ve o novo arquivo.
+
+### N2.4 -- digest trim_to_cap does not cut mid-entry (P)
+
+- Depende de: --
+- Arquivos: src/context/digest.rs
+- Problema: trim_to_cap (src/context/digest.rs:353) corta por contagem de caracteres
+  (cap * 4), o que pode partir uma decisao ou finding no meio da linha.
+- Solucao: cortar no ultimo quebra de linha antes do limite, garantindo entradas inteiras;
+  se sobrar menos de uma entrada, mostrar a mais recente completa e o marcador de truncamento.
+- Pronto quando: um digest truncado nunca termina com uma linha parcial; o conteudo
+  exibido e coerente.
+
+### N2.5 -- edit_file accepts anchor by line number (M)
+
+- Depende de: --
+- Arquivos: src/tools/fs.rs
+- Problema: edit_file exige que old_string seja unico no arquivo inteiro. Em arquivos
+  grandes com padroes repetidos (ex.: varios match _ => {), o agente precisa incluir muito
+  contexto para desambiguar -- desperdica tokens.
+- Solucao: adicionar parametro opcional anchor_line (1-based). Quando presente, a
+  substituicao so e considerada dentro de uma janela ao redor daquela linha (ex.: mais ou menos 20).
+  Mantem a garantia de unicidade dentro da janela. Nao introduz edicao por line-range pura (que e
+  fragil se o arquivo mudou) -- a ancora so estreita a busca.
+- Pronto quando: edit_file com anchor_line desambigua um snippet que aparece 3x no
+  arquivo; sem ancora, comportamento inalterado.
+
+### N2.6 -- Visible context occupancy in Coder Mode (P)
+
+- Depende de: --
+- Arquivos: src/ui/coder/sessions.rs, src/session/agent_loop.rs
+- Problema: AgentEvent::ContextOccupancy(f32) ja e emitido em pack_messages
+  (src/session/agent_loop.rs:355) e live.context_occupancy existe em LiveSession. Mas nao
+  ha exibicao visivel no Coder Mode -- o usuario nao sabe que esta perto do limite.
+- Solucao: pequena barra ou rotulo (68% do contexto) perto do medidor de custo, mudando de
+  cor ao passar de 80%. Reuso de occupancy_label (src/session/context_window.rs).
+- Pronto quando: a ocupacao e visivel e atualiza a cada turno; muda de cor no aviso.
+`;
+fs.writeFileSync(path, existing + part3, 'utf8');
+console.log('appended part 3 (P2)');""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const path='PlanejamentoMelhoria.md';
+const existing=fs.readFileSync(path,'utf8');
+const part4=String.raw`
+---
+
+# N3 -- Pipeline de IA: Sessoes Concorrentes vs Orquestrador
+
+A arquitetura atual do Orbit ja suporta varias sessoes concorrentes sobre o mesmo Project Context
+(.orbit/). Cada sessao tem seu proprio modelo, papel, historico e CancellationToken
+(SessionManager, src/session/manager.rs; DEFAULT_SESSION_SLOTS = 3). O handoff entre elas e
+automatico e gratuito: o digest (build_digest, src/context/digest.rs) injeta no system prompt de
+cada turno as decisoes recentes, as tarefas abertas e -- o item critico -- os arquivos alterados por
+outras sessoes desde a ultima execucao desta (foreign_changes). Isto realiza a tese do produto:
+trocar de modelo nao significa recomecar, significa que o proximo agente ja sabe o que aconteceu.
+
+Esta secao propoe um segundo modo de operacao que reusa essa mesma infraestrutura, mas em
+sequencia em vez de concorrencia: a pipeline. A decisao entre os dois modos e do usuario, por
+projeto, na UI do Coder Mode.
+
+## Os dois modos
+
+### Modo A -- Sessoes Concorrentes (ja existe)
+
+O usuario abre N sessoes manuais, cada uma com seu papel e modelo, e dirige cada uma livremente.
+Elas compartilham o estado via .orbit/; o digest resolve o handoff. Nenhuma automatizacao entre
+estagios -- o humano e o orquestrador.
+
+- Vantagem: controle total; o usuario decide quando e se passa o bastao; nada acontece que ele
+  nao tenha pedido.
+- Desvantagem: carga cognitiva alta com varias sessoes; facil esquecer de pedir ao Reviewer que
+  valide o que o Coder fez.
+- Custo de implementacao: zero -- e o estado atual.
+
+### Modo B -- Orquestrador (a construir)
+
+O usuario descreve uma feature, atribui um modelo a cada estagio, e o Orbit dispara os estagios em
+sequencia, passando o bastao automaticamente entre eles (com gates opcionais). O estado continua
+compartilhado via .orbit/; o handoff continua sendo o digest -- so que agora o orquestrador decide
+re-disparar o proximo estagio em vez de o humano trocar de aba.
+
+- Vantagem: fluxo ponta-a-ponta com uma unica instrucao; o Reviewer sempre roda depois do Coder;
+  o loop Coder<->Reviewer e quase gratuito (ver N3.3).
+- Desvantagem: menos controle fino por turno; risco de loop; custo invisivel se gates abertos.
+- Custo de implementacao: o orquestrador + sinal de conclusao + ferramentas de git (ver N3.4).
+
+## Decisao de produto: os dois modos coexistem
+
+Nao e um substituto, e uma alternativa. No cabecalho do Coder Mode o usuario escolhe o modo de
+operacao do projeto:
+
+- Sessoes Concorrentes (padrao, comportamento atual): o botao Nova Sessao cria sessoes livres;
+  nao ha pipeline.
+- Orquestrador: o botao vira Nova Pipeline; abre um dialogo de configuracao (N3.1) onde o
+  usuario atribui o modelo de cada estagio antes de pedir a feature.
+
+O estado compartilhado (.orbit/) e o mesmo nos dois modos. A diferenca e so quem dispara o
+proximo estagio: o humano (modo A) ou o orquestrador (modo B).
+
+## O estagios da pipeline
+
+| Estagio | Papel | Modelo (exemplo) | Risco | Gate para o proximo |
+|---|---|---|---|---|
+| Planner | Architect | forte (GPT-5.6 Sol) | leitura + contexto | automatico |
+| Coder | Coder | pequeno (V4 Flash / Grok 4.6) | escrita | automatico |
+| Reviewer | Reviewer | medio (GLM-5.2) | leitura + execucao de testes | manual (default) |
+| Submitter | Coder + git tools | n/a (ver N3.5) | execucao (git) | -- |
+
+Os modelos sao escolhidos pelo usuario no dialogo de configuracao (N3.1) antes de cada pipeline.
+Nada e hardcoded; o usuario pode reusar o mesmo modelo em todos os estagios se quiser.
+
+## N3.1 -- Dialogo de configuracao da pipeline (M)
+
+- Depende de: N0.1
+- Arquivos: src/ui/coder/sessions.rs, src/coder.rs
+- Objetivo: o usuario monta a pipeline antes de pedir a feature. Quatro combos de modelo,
+  um por estagio, preenchidos a partir do catalogo (MODEL_GROUPS). Defaults sensatos:
+  Planner = modelo de raciocinio mais forte do catalogo; Coder = modelo de coding rapido;
+  Reviewer = modelo de raciocinio medio; Submitter = n/a (ver N3.5). Um campo de texto para a
+  feature. Um toggle Auto por gate (default: auto entre Planner->Coder->Reviewer, manual antes
+  do Submitter).
+- Pronto quando: o dialogo abre, os combos refletem o catalogo, e ao confirmar o Orbit cria
+  as quatro sessoes (uma por estagio) sem dispara-las, esperando o primeiro estagio.
+
+## N3.2 -- Sinal de conclusao de estagio (M)
+
+- Depende de: N3.1
+- Arquivos: src/session/agent_loop.rs, src/session/manager.rs, src/coder.rs
+- Problema: run_turn (src/session/agent_loop.rs) retorna TurnResult (Completed,
+  IterationLimitReached, BudgetExceeded, Cancelled, Failed), mas o spawner em src/coder.rs:~1130
+  faz let _ = run_turn(...) -- o resultado e descartado. Nao ha callback de conclusao. O sinal
+  natural de estagio pronto ja existe: poll_all_detailed (src/session/manager.rs:195) detecta a
+  transicao busy -> false quando recebe AgentEvent::TurnFinished (apply_agent_event retorna
+  false). Mas ninguem observa essa transicao para encadear o proximo estagio.
+- Solucao: um enum PipelineEvent { StageFinished { stage, result }, ... } emitido quando a
+  sessao de um estagio sai de busy. O orquestrador assina esses eventos e decide o proximo passo.
+  Reuso da transicao que ja existe -- nao inventar um segundo canal de conclusao. O TurnResult
+  precisa chegar ate o orquestrador (hoje descartado), para distinguir Completed de Failed e
+  parar a pipeline em caso de falha.
+- Pronto quando: um teste dispara um estagio contra um provider simulado que termina com
+  FinishReason::Stop e o orquestrador recebe StageFinished { result: Completed }.
+
+## N3.3 -- O loop Coder<->Reviewer e quase gratuito (M)
+
+- Depende de: N3.2
+- Arquivos: src/session/agent_loop.rs, src/context/digest.rs
+- O achado arquitetural: quando o Reviewer rejeita, ele escreve findings via add_finding
+  (src/tools/context.rs:128). Quando o Coder roda de novo, o digest injeta Recent findings
+  (src/context/digest.rs:~88) -- o Coder automaticamente ve as criticas do Reviewer sem
+  nenhuma mensagem especial. O handoff do loop e o digest, de graça. O orquestrador so precisa
+  decidir re-disparar a sessao Coder; o que corrigir ja chegou pelo Project Context.
+- Solucao: guarda anti-loop -- no maximo 3 ciclos Coder->Reviewer->Coder. O orquestrador conta
+  os ciclos e, ao estourar, para a pipeline com um aviso claro e marca as tasks relevantes. O
+  Reviewer precisa de uma forma explicita de dizer aprovado ou rejeitado: um novo tool
+  approve_stage() que escreve no .orbit/ um registro estruturado que o orquestrador le
+  (nao parsear string de record_decision).
+- Pronto quando: o Reviewer rejeita, o Coder re-roda e o digest contem os findings; apos 3
+  ciclos a pipeline para com aviso; apos aprovacao do Reviewer a pipeline avanca para o Submitter.
+
+## N3.4 -- O Planner e read-only: o plano vira tasks + decision (P)
+
+- Depende de: N3.1
+- Arquivos: src/context/store.rs, src/tools/context.rs
+- Problema: AgentRole::Architect (src/session/roles.rs) e read-only + contexto -- nao tem
+  write_file. Entao o Planner nao consegue criar um PLAN.md no disco.
+- Solucao adotada: o plano e a lista de tarefas (update_task, em tasks.md) mais uma
+  record_decision descrevendo a abordagem. Tudo no Project Context, on-thesis, zero novo
+  arquivo. O Coder le o plano via digest (tarefas abertas + decisao de abordagem). Se um
+  PLAN.md humano-legivel for desejado depois, e um novo papel Planner com write_file escopado a
+  .orbit/plan.md -- mas e escopo, e fica fora desta rodada.
+- Pronto quando: o Planner, rodando como Architect, produz N tarefas em tasks.md e uma decisao
+  de abordagem; o Coder, no turno seguinte, ve ambos no digest.
+
+## N3.5 -- O Submitter e um script, nao o modelo mais barato (G)
+
+- Depende de: N3.2, N0.1
+- Arquivos: src/tools/git.rs (novo), src/tools/mod.rs, src/security/policy.rs, src/session/roles.rs
+- Decisao central: alocar o modelo menos confiavel na acao mais cara de reverter (commit +
+  push) e a inversao de risco. Um modelo minusclo pode cometer .env, forcar push em main,
+  escrever mensagem lixo, empurrar para o remote errado.
+- Solucao: o Submitter nao e um LLM. A inteligencia (o que commitar, qual mensagem) ja veio do
+  Reviewer; a execucao e mecanica. Implementar tres ferramentas com ToolRisk::Executing:
+  git_status, git_commit, git_push.
+  - git_status: ReadOnly; lista arquivos modificados.
+  - git_commit: Executing; aceita uma message (fornecida pelo Reviewer) e um caminho de
+    staging explicito. Recusa commitar qualquer arquivo que is_sensitive (src/security/paths.rs:147)
+    retorne true (.env, *.pem, *.key, id_rsa, .git/config, *.p12) -- sem opcao de aprovar. Esta e a
+    defesa contra vazamento de segredo mais concreta. Sujeito a denylist absoluta
+    (src/security/policy.rs: is_absolutely_denied ja cobre o padrao).
+  - git_push: Executing; sujeito a aprovacao manual obrigatoria. Forcar push (--force) e
+    negado por padrao; so com flag explicita e segundo gate de confirmacao.
+- Gates: Reviewer -> Submitter e sempre manual (default). O Reviewer escreve a mensagem do
+  commit a partir do diff; o Submitter executa a string pronta. O modelo barato nunca decide o
+  que entra no git.
+- Sessao do Submitter: usa AgentRole::Coder (precisa de write/exec) com o modelo mais barato,
+  OU -- preferivel -- uma sessao sem modelo que so invoca as ferramentas de git diretamente a
+  partir do veredito do Reviewer. A segunda opcao elimina o risco do modelo barato.
+- Estas ferramentas estao explicitamente fora da v1.0 (PlanejamentoDefinitivo.md S7.3). A pipeline
+e o caso de uso que justifica retira-las do backlog e implementa-las, com as restricoes acima.
+- Pronto quando: git_status lista os arquivos; git_commit com .env na staging e recusado sem
+  opcao de aprovar; git_push exige aprovacao manual; um teste forca um --force e e negado.
+
+## N3.6 -- Orquestrador (M)
+
+- Depende de: N3.2, N3.3, N3.5
+- Arquivos: src/pipeline/mod.rs (novo), src/coder.rs, src/session/manager.rs
+- Objetivo: o componente que encadeia os estagios. Mantem o estado da pipeline (estagio
+  atual, contagem de ciclos, veredito do Reviewer) e reage a PipelineEvent::StageFinished.
+- Fluxo: Planner (auto) -> Coder (auto) -> Reviewer (auto) -> [loop ate 3x: Coder -> Reviewer] ->
+  Submitter (gate manual). Cada transicao monta um novo TurnDeps com o modelo e papel do
+  proximo estagio e chama run_turn via rt.spawn. O sinal de conclusao (N3.2) dispara a proxima.
+- Cancelamento: um CancellationToken da pipeline cancela todos os estagios; resolver
+  aprovacoes pendentes como Denied (mesmo padrao de cancel_coder_turn, src/coder.rs:1289).
+- UI: o transcript da pipeline mostra os estagios como blocos sequenciais (Planner: ..., Coder: ...,
+  Reviewer: aprovado/rejeitado, Submitter: pendente aprovacao). O usuario ve o fluxo inteiro numa
+  unica conversa, nao em quatro abas separadas.
+- Pronto quando: uma pipeline contra providers simulados percorre Planner -> Coder -> Reviewer
+  -> Submitter sem intervencao (gates auto ate o Submitter); o Reviewer rejeita uma vez e o Coder
+  re-roda; o Submitter espera gate manual; cancelar a pipeline para tudo limpo.
+
+## Resumo da pipeline
+
+| Item | Foco | Maior impacto |
+|---|---|---|
+| N3.1 | Configuracao | Usuario escolhe modelos por estagio |
+| N3.2 | Sinal de conclusao | Encadeia estagios sem callback novo |
+| N3.3 | Loop Coder<->Reviewer | Handoff gratis via digest |
+| N3.4 | Planner read-only | Plano = tasks + decision, sem novo arquivo |
+| N3.5 | Submitter como script | Seguranca: segredo recusado, gate manual no git |
+| N3.6 | Orquestrador | Encadeia os estagios |
+
+A pipeline reusa a tese do produto (estado compartilhado via .orbit/) no eixo temporal. O grosso
+ da infraestrutura ja existe; o que falta e o orquestrador, o sinal de conclusao e as ferramentas
+de git com as restricoes de seguranca.
+`;
+fs.writeFileSync(path, existing + part4, 'utf8');
+console.log('appended part 4 (N3 pipeline)');""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const path='PlanejamentoMelhoria.md';
+const existing=fs.readFileSync(path,'utf8');
+const part5=String.raw`
+---
+
+## Resumo de impacto
+
+| Faixa | Foco | Itens de maior impacto |
+|---|---|---|
+| P0 | Seguranca e armadilhas | N0.1 (dispatch guard), N0.4+N0.5 (prompt caching = custo) |
+| P1 | Custo, latencia, UX | N1.1 (multi_edit = latencia), N1.3 (busca Coder), N1.4 (summary barato) |
+| P2 | Polimento | N2.1 (atalho), N2.3 (cache de walk), N2.6 (ocupacao visivel) |
+| N3 | Pipeline de IA | N3.1 (config), N3.2 (sinal), N3.5 (submitter script), N3.6 (orquestrador) |
+
+Maior ganho de custo: N0.4 + N0.5 -- prompt caching no prefixo estavel do system prompt.
+Maior ganho de latencia: N1.1 -- multi_edit colapsa 5 aprovacoes/turnos em 1.
+Maior ganho de seguranca: N0.1 -- guarda de papel no dispatch, nao so no catalogo.
+Maior ganho de UX: N1.3 -- busca entre sessoes no Coder Mode, reusando FTS ja existente.
+Maior ganho de produto: N3 -- pipeline reusa a tese do estado compartilhado no eixo temporal.
+
+## Fora do escopo desta rodada
+
+- Novos providers diretos (Anthropic, OpenAI) alem do OpenRouter -- decisao de produto, nao de
+  engenharia.
+- Editor de codigo embutido (decidido contra em S4.4 do PlanejamentoDefinitivo).
+- macOS (decidido contra em S4.6).
+- Orquestracao automatica entre papéis sem o modo Orquestrador explicito -- o modo Sessoes
+  Concorrentes continua manual por design.
+- Papel Planner com write_file escopado a .orbit/plan.md -- a solucao adotada (N3.4) usa
+  tasks + decision, sem novo arquivo. Um PLAN.md dedicado e escopo futuro se houver demanda.
+- Auto-gate no Submitter -- sempre manual por design (N3.5).
+`;
+fs.writeFileSync(path, existing + part5, 'utf8');
+console.log('appended part 5 (resumo + escopo)');
+const final=fs.readFileSync(path,'utf8');
+console.log('total bytes:', final.length);
+console.log('total lines:', final.split(String.fromCharCode(10)).length);""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const p='PlanejamentoMelhoria.md';
+let s=fs.readFileSync(p,'utf8');
+// Correction 1: line ~287 "automatico e gratuito"
+s=s.replace('automatico e gratuito: o digest (build_digest','automatico e de baixo overhead: o digest (build_digest');
+// Correction 2: line ~318 "e quase gratuito"
+s=s.replace('o loop Coder<->Reviewer e quase gratuito (ver N3.3).','o loop Coder<->Reviewer e de baixo overhead (ver N3.3).');
+// Correction 3: section header N3.3 "e quase gratuito"
+s=s.replace('## N3.3 -- O loop Coder<->Reviewer e quase gratuito (M)','## N3.3 -- O loop Coder<->Reviewer e de baixo overhead (M)');
+// Correction 4: inside N3.3 "de graca"/"gratuita"
+s=s.replace('O handoff do loop e o digest, de graca.','O handoff do loop e o digest, de baixo overhead.');
+// Correction 5: the outro 'quase gratuito' if present
+s=s.split('quase gratuito').join('de baixo overhead');
+fs.writeFileSync(p,s,'utf8');
+const c=(s.match(/gratuito|gratuita|gratuit/g)||[]).length;
+console.log('gratuito remaining:',c);
+console.log('baixo overhead count:',(s.match(/baixo overhead/g)||[]).length);""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    '''
+const fs=require('fs');
+const p='PlanejamentoMelhoria.md';
+let s=fs.readFileSync(p,'utf8');
+// Replace the N3.1 objective paragraph to reflect Git Gate instead of Submitter combo
+const oldN31='## N3.1 -- Dialogo de configuracao da pipeline (M)\n\n- Depende de: N0.1\n- Arquivos: src/ui/coder/sessions.rs, src/coder.rs\n- Objetivo: o usuario monta a pipeline antes de pedir a feature. Quatro combos de modelo,\n  um por estagio, preenchidos a partir do catalogo (MODEL_GROUPS). Defaults sensatos:\n  Planner = modelo de raciocinio mais forte do catalogo; Coder = modelo de coding rapido;\n  Reviewer = modelo de raciocinio medio; Submitter = n/a (ver N3.5). Um campo de texto para a\n  feature. Um toggle Auto por gate (default: auto entre Planner->Coder->Reviewer, manual antes\n  do Submitter).\n- Pronto quando: o dialogo abre, os combos refletem o catalogo, e ao confirmar o Orbit cria\n  as quatro sessoes (uma por estagio) sem dispara-las, esperando o primeiro estagio.';
+const newN31='## N3.1 -- Dialogo de configuracao da pipeline (M)\n\n- Depende de: N0.1\n- Arquivos: src/ui/coder/sessions.rs, src/coder.rs\n- Objetivo: o usuario monta a pipeline antes de pedir a feature. Tres combos de modelo, um por\n  estagio de inteligencia (Planner, Coder, Reviewer), preenchidos a partir do catalogo\n  (MODEL_GROUPS). Defaults sensatos: Planner = modelo de raciocinio mais forte do catalogo;\n  Coder = modelo de coding rapido; Reviewer = modelo de raciocinio medio. Cada combo tem uma\n  opcao Auto (ver N3.7). O Git Gate (N3.5) nao e um estagio de inteligencia e aparece como um\n  seletor de gate (Manual, padrao), nao como um combo de modelo. Um campo de texto para a feature\n  e um seletor de complexidade (Trivial / Normal / Complex, ver N3.9) que define o fluxo. Um\n  toggle Auto por gate entre estagios de inteligencia (default: auto entre Planner->Coder->Reviewer,\n  sempre manual antes do Git Gate).\n- Pronto quando: o dialogo abre, os combos refletem o catalogo, o Git Gate aparece como seletor\n  de gate (nao combo de modelo), e ao confirmar o Orbit cria as tres sessoes de inteligencia sem\n  dispara-las, esperando o primeiro estagio.';
+if(s.indexOf(oldN31)===-1){console.error('N3.1 block NOT FOUND - aborting');process.exit(1);}
+s=s.replace(oldN31,newN31);
+fs.writeFileSync(p,s,'utf8');
+console.log('N3.1 updated, quatro combos removed:', s.indexOf('Quatro combos')===-1);''',
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    '''
+const fs=require('fs');
+const p='PlanejamentoMelhoria.md';
+let s=fs.readFileSync(p,'utf8');
+
+// Update the stages table: rename Submitter row to Git Gate
+const oldTable='| Submitter | Coder + git tools | n/a (ver N3.5) | execucao (git) | -- |';
+const newTable='| Git Gate | n/a (script, nao LLM) | n/a (ver N3.5) | execucao (git) | -- |';
+if(s.indexOf(oldTable)===-1){console.error('table row NOT FOUND');process.exit(1);}
+s=s.replace(oldTable,newTable);
+
+// Update N3.5 header: Submitter -> Git Gate
+s=s.replace('## N3.5 -- O Submitter e um script, nao o modelo mais barato (G)','## N3.5 -- O Git Gate: o Submitter e um script, nao um LLM (G)');
+
+// Update N3.6 fluxo: Submitter -> Git Gate
+s=s.replace('Submitter (gate manual). Cada transicao','Git Gate (gate manual). Cada transicao');
+s=s.replace('Reviewer: aprovado/rejeitado, Submitter: pendente aprovacao).','Reviewer: aprovado/rejeitado, Git Gate: pendente aprovacao).');
+s=s.replace('-> Submitter sem intervencao (gates auto ate o Submitter); o Reviewer rejeita uma vez e o Coder\n  re-roda; o Submitter espera gate manual;','-> Git Gate sem intervencao (gates auto ate o Git Gate); o Reviewer rejeita uma vez e o Coder\n  re-roda; o Git Gate espera gate manual;');
+
+// Update N3.6 depends to include contract
+s=s.replace('- Depende de: N3.2, N3.3, N3.5','- Depende de: N3.2, N3.3, N3.5, N3.7, N3.8 (o contrato e a verificacao deterministica\n  devem existir antes do orquestrador)');
+
+// Update resumo da pipeline table row N3.5
+s=s.replace('| N3.5 | Submitter como script | Seguranca: segredo recusado, gate manual no git |','| N3.5 | Git Gate (script) | Seguranca: segredo recusado, gate manual no git |');
+
+// Update Fora do escopo: Auto-gate no Submitter
+s=s.replace('- Auto-gate no Submitter -- sempre manual por design (N3.5).','- Auto-gate no Git Gate -- sempre manual por design (N3.5).');
+
+// Update intro line about Submitter in Modo B
+s=s.replace('apos aprovacao do Reviewer a pipeline avanca para o Submitter.','apos aprovacao do Reviewer a pipeline avanca para o Git Gate.');
+
+// Update N3.3 pronto quando
+s=s.replace('apos aprovacao do Reviewer a pipeline avanca para o Submitter.','apos aprovacao do Reviewer a pipeline avanca para o Git Gate.');
+
+fs.writeFileSync(p,s,'utf8');
+console.log('Submitter remaining count:', (s.match(/Submitter/g)||[]).length);
+console.log('Git Gate count:', (s.match(/Git Gate/g)||[]).length);''',
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const p='PlanejamentoMelhoria.md';
+let s=fs.readFileSync(p,'utf8');
+// Inside N3.5 body, replace Submitter -> Git Gate for consistency
+s=s.replace('- Solucao: o Submitter nao e um LLM. A inteligencia (o que commitar, qual mensagem) ja veio do','- Solucao: o Git Gate nao e um LLM. A inteligencia (o que commitar, qual mensagem) ja veio do');
+s=s.replace('- Gates: Reviewer -> Submitter e sempre manual (default). O Reviewer escreve a mensagem do','- Gates: Reviewer -> Git Gate e sempre manual (default). O Reviewer escreve a mensagem do');
+s=s.replace('commit a partir do diff; o Submitter executa a string pronta. O modelo barato nunca decide o','commit a partir do diff; o Git Gate executa a string pronta. O modelo barato nunca decide o');
+s=s.replace('- Sessao do Submitter: usa AgentRole::Coder (precisa de write/exec) com o modelo mais barato,','- Sessao do Git Gate: usa AgentRole::Coder (precisa de write/exec) com o modelo mais barato,');
+fs.writeFileSync(p,s,'utf8');
+console.log('Submitter remaining:', (s.match(/Submitter/g)||[]).length);""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    """
+const fs=require('fs');
+const p='PlanejamentoMelhoria.md';
+let s=fs.readFileSync(p,'utf8');
+
+// Fix remaining 'gratis' in summary table
+s=s.replace('| N3.3 | Loop Coder<->Reviewer | Handoff gratis via digest |','| N3.3 | Loop Coder<->Reviewer | Handoff de baixo overhead via digest |');
+
+// Insert new sections N3.7, N3.8, N3.9 BEFORE '## Resumo da pipeline'
+const newSections=String.raw`## N3.7 -- Pipeline Context Contract e Acceptance Criteria (G)
+
+- Depende de: N3.4
+- Arquivos: src/context/store.rs, src/tools/context.rs, src/pipeline/contract.rs (novo)
+- Pre-requisito de: N3.6 (o orquestrador nao deve ser construido sobre outputs implicitos)
+- Problema: hoje o handoff entre estagios depende do proximo modelo inferir corretamente a
+  intencao a partir do digest -- frágil. O Reviewer precisa julgar se o codigo parece bom
+  (subjetivo, caro em modelo medio) em vez de verificar se o contrato foi cumprido (objetivo,
+  mais barato e mais confiavel).
+- Solucao: cada estagio tem um contrato explicito de saida (stage artifacts), armazenado no
+  .orbit/ como um registro estruturado (nao string de record_decision):
+
+  Planner OUTPUT: tasks, architectural decision, acceptance criteria, scope, non-goals.
+  Coder OUTPUT: files changed, implementation summary, tests executed, test results,
+    unresolved issues.
+  Reviewer OUTPUT: PASS / FAIL, acceptance criteria status (item a item), findings,
+    required fixes, commit message.
+
+  Acceptance Criteria sao definidos pelo Planner e sao imutaveis pelo Coder. O Reviewer
+  produz um veredito objetivo checando cada AC:
+
+    PASS
+    AC1: ok
+    AC2: ok
+
+  ou:
+
+    REJECT
+    AC3: falhou -- Migration can overwrite existing records.
+
+  Isto torna o Reviewer adequado a um modelo medio: a tarefa passa de julgar se o codigo parece
+  bom para verificar se o contrato foi cumprido. Um novo tool approve_stage(verdict, ac_status)
+  escreve o veredito estruturado que o orquestrador le.
+- Pronto quando: o Planner emite ACs; o Coder nao pode altera-los; o Reviewer produz veredito
+  PASS/FAIL com status por AC; o orquestrador le o veredito estruturado (nao parseia string).
+
+## N3.8 -- Verificacao deterministica antes do Reviewer (M)
+
+- Depende de: N3.2
+- Arquivos: src/session/agent_loop.rs, src/tools/shell.rs, src/pipeline/mod.rs (novo)
+- Pre-requisito de: N3.6
+- Problema: o Principio 4 exige a triade (fmt/clippy/test) como condicao de fim de tarefa,
+  mas nao como etapa formal da pipeline. O Reviewer hoje receberia o diff e teria que descobrir
+  problemas que o compilador, linter ou testes ja detectam -- desperdico de tokens de um modelo
+  medio para trabalho deterministico.
+- Solucao: etapa formal entre Coder e Reviewer. O orquestrador, ao terminar o estagio Coder,
+  roda determinasticamente via run_command (src/tools/shell.rs, ja existe):
+
+  1. cargo fmt --all --check
+  2. cargo clippy --all-targets -- -D warnings
+  3. cargo test --all-targets
+
+  O resultado (passou / qual falhou + saida) e anexado aos stage artifacts do Coder. O Reviewer
+  recebe DIFF + TASKS + ACCEPTANCE CRITERIA + TEST RESULTS + LINT RESULTS -- nao gasta tokens
+  descobrindo o que o toolchain ja detectou. Para projetos nao-Rust, o mesmo principio se aplica
+  ao toolchain correspondente (npm test, go vet, etc.), lido das run configs (M1.4).
+- Pronto quando: o Coder termina e o orquestrador roda a triade antes de disparar o Reviewer;
+  o Reviewer recebe os resultados no contrato; uma falha de clippy e visivel para o Reviewer
+  sem ele precisar roda-la.
+
+## N3.9 -- Routing por complexidade (M)
+
+- Depende de: N3.1, N3.7
+- Arquivos: src/ui/coder/sessions.rs, src/pipeline/mod.rs (novo)
+- Objetivo: nem todo pedido precisa da pipeline completa. "Fix typo" nao deveria passar por
+  Planner -> Coder -> Reviewer. O routing adapta o fluxo a complexidade do pedido --
+  provavelmente o maior economizador de custo do backlog.
+- Solucao (versao manual nesta rodada): no dialogo de configuracao (N3.1), o usuario escolhe a
+  complexidade:
+
+  - Trivial (ex.: fix typo, rename variable, add missing import): fluxo Coder direto.
+  - Normal (ex.: add search to sessions): fluxo Planner -> Coder -> Verify (N3.8).
+  - Complex (ex.: replace storage subsystem): fluxo Planner -> Coder -> Verify -> Reviewer ->
+    loop ate 3x -> Git Gate.
+
+  A classificacao automatica (heuristica ou LLM classificador) fica fora desta rodada: heuristica
+  por tamanho de prompt e fragil, e um LLM classificador adiciona um turno de modelo antes da
+  pipeline, que e exatamente o custo que se quer evitar. A versao manual ja entrega o ganho de
+  custo. Automatizar depois, com dados reais de uso.
+- Pronto quando: o dialogo oferece os tres fluxos; escolher Trivial dispara so o Coder;
+  escolher Complex dispara a pipeline completa com Reviewer e Git Gate.
+
+## N3.10 -- Opcao Auto de modelo por estagio (M)
+
+- Depende de: N3.1
+- Arquivos: src/providers/catalog.rs, src/app.rs, src/ui/coder/sessions.rs
+- Objetivo: reduzir friccao. Cada combo de estagio (Planner/Coder/Reviewer) tem uma opcao Auto.
+  Usuarios que nao querem gerenciar modelos nao precisam escolher.
+- Solucao: a politica Auto mapeia classe de papel a classe de modelo:
+
+  Planner  -> strongest reasoning
+  Coder    -> best cost/performance coding
+  Reviewer -> strong verification
+
+  Exige uma classificacao dos modelos do catalogo que HOJE NAO EXISTE: AiModel
+  (src/providers/mod.rs:103) tem prompt_price, completion_price, context_length, supports_tools,
+  supports_vision, mas nenhum campo de classe. Implementar Auto exige enriquecer o catalogo com
+  essa classificacao (curadoria estatica de MODEL_GROUPS em src/app.rs, ja com descriptors humanos
+  que poderiam virar tags, ou campo novo). Nao e um mero toggle de UI -- e trabalho extra nao
+  trivial. Endossado como objetivo, com a ressalva de que depende de enriquecer o catalogo.
+- Pronto quando: com Auto selecionado, o Orbit escolhe o modelo por estagio segundo a politica;
+  usuarios avancados ainda podem escolher manualmente.
+
+`;
+
+const marker='## Resumo da pipeline';
+if(s.indexOf(marker)===-1){console.error('marker NOT FOUND');process.exit(1);}
+s=s.replace(marker, newSections + marker);
+fs.writeFileSync(p,s,'utf8');
+console.log('new sections inserted');
+console.log('N3.7 present:', s.indexOf('N3.7')!==-1);
+console.log('N3.8 present:', s.indexOf('N3.8')!==-1);
+console.log('N3.9 present:', s.indexOf('N3.9')!==-1);
+console.log('N3.10 present:', s.indexOf('N3.10')!==-1);""",
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    '''
+const fs=require('fs');
+const p='PlanejamentoMelhoria.md';
+let s=fs.readFileSync(p,'utf8');
+
+// Expand the pipeline summary table
+const oldSummary='## Resumo da pipeline\n\n| Item | Foco | Maior impacto |\n|---|---|---|\n| N3.1 | Configuracao | Usuario escolhe modelos por estagio |\n| N3.2 | Sinal de conclusao | Encadeia estagios sem callback novo |\n| N3.3 | Loop Coder<->Reviewer | Handoff de baixo overhead via digest |\n| N3.4 | Planner read-only | Plano = tasks + decision, sem novo arquivo |\n| N3.5 | Git Gate (script) | Seguranca: segredo recusado, gate manual no git |\n| N3.6 | Orquestrador | Encadeia os estagios |\n\nA pipeline reusa a tese do produto (estado compartilhado via .orbit/) no eixo temporal. O grosso\n da infraestrutura ja existe; o que falta e o orquestrador, o sinal de conclusao e as ferramentas\nde git com as restricoes de seguranca.';
+
+const newSummary='## Resumo da pipeline\n\n| Item | Foco | Maior impacto |\n|---|---|---|\n| N3.1 | Configuracao | Tres combos de modelo + seletor de complexidade + Git Gate |\n| N3.2 | Sinal de conclusao | Encadeia estagios sem callback novo |\n| N3.3 | Loop Coder<->Reviewer | Handoff de baixo overhead via digest |\n| N3.4 | Planner read-only | Plano = tasks + decision, sem novo arquivo |\n| N3.5 | Git Gate (script, nao LLM) | Seguranca: segredo recusado, gate manual no git |\n| N3.6 | Orquestrador | Encadeia os estagios (depende do contrato, N3.7/N3.8) |\n| N3.7 | Contrato + Acceptance Criteria | Reviewer verifica contrato, nao julga subjetivamente |\n| N3.8 | Verificacao deterministica | Reviewer nao gasta tokens no que o toolchain detecta |\n| N3.9 | Routing por complexidade | Trivial nao passa por Planner -- maior economia de custo |\n| N3.10 | Opcao Auto de modelo | Reduz friccao (exige enriquecer o catalogo) |\n\nOrdem conceitual de dependencia (nao obrigatorio renumerar): N3.1 -> N3.7 (contrato) -> N3.4\n(Planner output) -> N3.2 (lifecycle) -> N3.8 (verificacao) -> N3.3 (review loop) -> N3.6\n(orchestrator) -> N3.5 (Git Gate) -> N3.9 (routing) / N3.10 (Auto) como camadas de UX.\n\nA pipeline reusa a tese do produto (estado compartilhado via .orbit/) no eixo temporal. O grosso\n da infraestrutura ja existe; o que falta e o orquestrador, o sinal de conclusao, o contrato\nformal de handoff, a verificacao deterministica e as ferramentas de git com as restricoes de\nseguranca. O contrato (N3.7) e a verificacao (N3.8) sao pre-requisitos do orquestrador (N3.6): sem\neles, a pipeline e uma sequencia de sessoes inteligentes dependentes de interpretacao livre do\ndigest; com eles, e uma linha de producao verificavel.';
+
+if(s.indexOf(oldSummary)===-1){console.error('summary NOT FOUND');process.exit(1);}
+s=s.replace(oldSummary,newSummary);
+
+// Add routing/contract to Fora do escopo section adjustments
+s=s.replace('- Auto-gate no Git Gate -- sempre manual por design (N3.5).','- Auto-gate no Git Gate -- sempre manual por design (N3.5).\n- Classificacao automatica de complexidade (N3.9) -- nesta rodada o routing e escolha manual\n  do usuario; automatizar a classificacao fica para depois, com dados reais de uso.');
+
+fs.writeFileSync(p,s,'utf8');
+console.log('summary updated');
+console.log('gratis remaining:', (s.match(/\bgratis\b/g)||[]).length);''',
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "-e",
+    '''
+const fs=require('fs');
+const p='PlanejamentoMelhoria.md';
+let s=fs.readFileSync(p,'utf8');
+
+// Update the final impact table to include N3 expansions
+const oldImpact='| N3 | Pipeline de IA | N3.1 (config), N3.2 (sinal), N3.5 (submitter script), N3.6 (orquestrador) |';
+const newImpact='| N3 | Pipeline de IA | N3.7 (contrato/AC), N3.8 (verificacao), N3.9 (routing), N3.6 (orquestrador) |';
+if(s.indexOf(oldImpact)!==-1){s=s.replace(oldImpact,newImpact);}
+
+// Update the maior ganho de produto line
+const oldGanho='Maior ganho de produto: N3 -- pipeline reusa a tese do estado compartilhado no eixo temporal.';
+const newGanho='Maior ganho de produto: N3 -- pipeline reusa a tese do estado compartilhado no eixo temporal.\nMaior ganho de custo da pipeline: N3.9 -- routing por complexidade evita Planner+Reviewer em pedidos triviais.';
+if(s.indexOf(oldGanho)!==-1){s=s.replace(oldGanho,newGanho);}
+
+fs.writeFileSync(p,s,'utf8');
+console.log('impact table updated');
+console.log('total lines:', s.split(String.fromCharCode(10)).length);
+console.log('total bytes:', s.length);''',
+]
+program = "node"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "dispatch_guard",
+    "--all-targets",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "tools::fs",
+    "--all-targets",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "session::roles",
+    "--all-targets",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "context::digest",
+    "--all-targets",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "providers::openrouter",
+    "--all-targets",
+]
+program = "cargo"
+
+[[commands.allowed]]
+args = [
+    "test",
+    "tools::shell",
+    "--all-targets",
+]
+program = "cargo"
 
 [context]
 recent_decisions = 10
 token_cap = 4000
-
-[budget]
-session_usd = 2.0

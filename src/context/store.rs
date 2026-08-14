@@ -57,6 +57,9 @@ pub struct DigestSettings {
     pub recent_decisions: usize,
     pub token_cap: usize,
     pub session_budget_usd: f64,
+    /// Optional cheaper model for context-window summarization. If empty, the
+    /// session's own model is used (unchanged behavior).
+    pub summary_model: Option<String>,
 }
 
 impl Default for DigestSettings {
@@ -65,6 +68,7 @@ impl Default for DigestSettings {
             recent_decisions: 10,
             token_cap: 4000,
             session_budget_usd: 2.0,
+            summary_model: None,
         }
     }
 }
@@ -74,6 +78,7 @@ pub struct Decision {
     pub at: DateTime<Utc>,
     pub model: String,
     pub session: String,
+    pub role: String,
     pub decision: String,
     pub rationale: String,
     pub files: Vec<String>,
@@ -85,6 +90,7 @@ pub struct Finding {
     pub at: DateTime<Utc>,
     pub model: String,
     pub session: String,
+    pub role: String,
     pub description: String,
     pub severity: String,
     pub location: Option<String>,
@@ -455,6 +461,11 @@ fn load_digest_settings(path: &Path) -> DigestSettings {
             .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
             .map(|n| n.clamp(0.01, 10_000.0))
             .unwrap_or(2.0),
+        summary_model: ctx
+            .and_then(|c| c.get("summary_model"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
     }
 }
 
@@ -613,6 +624,7 @@ fn parse_decision_block(heading: &str, body: &str) -> Result<Decision, String> {
         at,
         model,
         session,
+        role: field(body, &["Role", "Papel"]).unwrap_or_else(|| "Coder".to_string()),
         decision,
         rationale,
         files,
@@ -635,6 +647,7 @@ fn parse_finding_block(heading: &str, body: &str) -> Result<Finding, String> {
         at,
         model,
         session,
+        role: field(body, &["Role", "Papel"]).unwrap_or_else(|| "Coder".to_string()),
         description,
         severity,
         location,
@@ -704,12 +717,14 @@ pub fn format_decision(d: &Decision) -> String {
     };
     format!(
         "## {at} — {model} (session \"{session}\")\n\
+         **Role:** {role}\n\
          **Decision:** {decision}\n\
          **Rationale:** {rationale}\n\
          {files}",
         at = d.at.to_rfc3339(),
         model = d.model,
         session = d.session,
+        role = d.role,
         decision = d.decision,
         rationale = d.rationale,
     )
@@ -723,12 +738,14 @@ pub fn format_finding(f: &Finding) -> String {
         .unwrap_or_default();
     format!(
         "## {at} — {model} (session \"{session}\")\n\
+         **Role:** {role}\n\
          **Finding:** {description}\n\
          **Severity:** {severity}\n\
          {loc}",
         at = f.at.to_rfc3339(),
         model = f.model,
         session = f.session,
+        role = f.role,
         description = f.description,
         severity = f.severity,
     )
@@ -794,6 +811,7 @@ mod tests {
                     .with_timezone(&Utc),
                 model: "claude-opus-5".into(),
                 session: "architecture".into(),
+                role: "Reviewer".into(),
                 decision: "Use JWT with refresh tokens.".into(),
                 rationale: "Stateless API sessions.".into(),
                 files: vec!["src/auth/token.rs".into()],
@@ -807,7 +825,21 @@ mod tests {
         store.reload();
         assert_eq!(store.decisions.len(), 1);
         assert_eq!(store.decisions[0].session, "architecture");
+        assert_eq!(store.decisions[0].role, "Reviewer");
         assert_eq!(store.decisions[0].files[0], "src/auth/token.rs");
+    }
+
+    #[test]
+    fn legacy_decision_without_role_defaults_to_coder() {
+        let text = r#"
+## 2026-08-12T14:32:11Z — claude-opus-5 (session "arquitetura")
+**Decision:** An old entry, no Role line.
+**Rationale:** Legacy format.
+"#;
+        let (items, warnings) = parse_decisions(text);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].role, "Coder");
     }
 
     #[test]
@@ -845,5 +877,28 @@ mod tests {
         assert_eq!(store.tasks.len(), 1);
         assert_eq!(store.tasks[0].status, TaskStatus::InProgress);
         assert_eq!(store.tasks[0].description, "Cover auth");
+    }
+
+    #[test]
+    fn summary_model_is_parsed_from_context_config() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(root.join(".orbit")).unwrap();
+        std::fs::write(
+            root.join(".orbit").join(CONFIG_TOML),
+            "[context]\nrecent_decisions = 10\ntoken_cap = 4000\nsummary_model = \"flash-cheap\"\n",
+        )
+        .unwrap();
+        let store = OrbitStore::open(&root);
+        assert_eq!(store.settings.summary_model.as_deref(), Some("flash-cheap"));
+    }
+
+    #[test]
+    fn summary_model_defaults_to_none_without_config() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = OrbitStore::open(&root);
+        assert_eq!(store.settings.summary_model, None);
     }
 }

@@ -46,8 +46,8 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Deep thinking",
             },
             ModelEntry {
-                id: "google/gemini-3.6-flash",
-                name: "Gemini 3.6 Flash",
+                id: "google/gemini-3.7-flash",
+                name: "Gemini 3.7 Flash",
                 descriptor: "Balanced model",
             },
             ModelEntry {
@@ -81,13 +81,13 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "SpaceXAI",
         models: &[
             ModelEntry {
-                id: "x-ai/grok-4.5",
-                name: "Grok 4.5",
+                id: "x-ai/grok-4.6",
+                name: "Grok 4.6",
                 descriptor: "Uncensored superpowered reasoning",
             },
             ModelEntry {
-                id: "x-ai/grok-4.3",
-                name: "Grok 4.3",
+                id: "x-ai/grok-4.5",
+                name: "Grok 4.5",
                 descriptor: "Uncensored advanced reasoning",
             },
             ModelEntry {
@@ -121,7 +121,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "DeepSeek",
         models: &[
             ModelEntry {
-                id: "deepseek/deepseek-v4-pro",
+                id: "deepseek/deepseek-v4-pro-0813",
                 name: "DeepSeek V4 Pro",
                 descriptor: "DeepSeek's latest advanced model",
             },
@@ -260,6 +260,62 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
 ];
 
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+
+/// Class used by N3.10 Auto model selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelClass {
+    StrongReasoning,
+    CostPerformance,
+    StrongVerification,
+}
+
+pub fn classify_model(id: &str, descriptor: &str) -> ModelClass {
+    let blob = format!("{id} {descriptor}").to_ascii_lowercase();
+    if blob.contains("coding") || blob.contains("agentic") || blob.contains("build") {
+        return ModelClass::CostPerformance;
+    }
+    if blob.contains("flash")
+        || blob.contains("luna")
+        || blob.contains("cheap")
+        || blob.contains("fast")
+        || blob.contains("lite")
+    {
+        return ModelClass::CostPerformance;
+    }
+    if blob.contains("sota")
+        || blob.contains("opus")
+        || blob.contains("sol")
+        || blob.contains("fable")
+        || blob.contains("ultra")
+        || blob.contains("extreme")
+    {
+        return ModelClass::StrongReasoning;
+    }
+    if blob.contains("reason") || blob.contains("think") || blob.contains("pro") {
+        return ModelClass::StrongReasoning;
+    }
+    if blob.contains("sonnet") || blob.contains("terra") || blob.contains("balanced") {
+        return ModelClass::StrongVerification;
+    }
+    ModelClass::StrongVerification
+}
+
+/// Planner → strongest reasoning, Coder → cost/performance, Reviewer → verification.
+pub fn auto_model_for(stage: crate::pipeline::contract::StageKind) -> &'static str {
+    let want = match stage {
+        crate::pipeline::contract::StageKind::Planner => ModelClass::StrongReasoning,
+        crate::pipeline::contract::StageKind::Coder => ModelClass::CostPerformance,
+        crate::pipeline::contract::StageKind::Reviewer => ModelClass::StrongVerification,
+        crate::pipeline::contract::StageKind::Verify
+        | crate::pipeline::contract::StageKind::GitGate => ModelClass::CostPerformance,
+    };
+    MODEL_GROUPS
+        .iter()
+        .flat_map(|g| g.models)
+        .find(|m| classify_model(m.id, m.descriptor) == want)
+        .map(|m| m.id)
+        .unwrap_or(DEFAULT_MODEL)
+}
 
 #[allow(dead_code)]
 pub fn find_model(id: &str) -> Option<&'static ModelEntry> {
@@ -439,6 +495,31 @@ mod tests {
         assert_eq!(
             catalog.display_name("vendor/missing-model"),
             "vendor/missing-model"
+        );
+    }
+
+    #[test]
+    fn auto_policy_picks_a_class_per_stage() {
+        use super::{ModelClass, auto_model_for, classify_model, find_model};
+        use crate::pipeline::contract::StageKind;
+
+        let planner = auto_model_for(StageKind::Planner);
+        let coder = auto_model_for(StageKind::Coder);
+        let reviewer = auto_model_for(StageKind::Reviewer);
+        let p = find_model(planner).expect("planner model in catalog");
+        let c = find_model(coder).expect("coder model in catalog");
+        let r = find_model(reviewer).expect("reviewer model in catalog");
+        assert_eq!(
+            classify_model(p.id, p.descriptor),
+            ModelClass::StrongReasoning
+        );
+        assert_eq!(
+            classify_model(c.id, c.descriptor),
+            ModelClass::CostPerformance
+        );
+        assert_eq!(
+            classify_model(r.id, r.descriptor),
+            ModelClass::StrongVerification
         );
     }
 }

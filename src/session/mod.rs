@@ -5,6 +5,7 @@ pub mod context_window;
 pub mod export;
 pub mod manager;
 pub mod message_ops;
+pub mod roles;
 
 pub use manager::SessionManager;
 
@@ -16,6 +17,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use uuid::Uuid;
+
+pub use crate::session::roles::AgentRole;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -56,6 +59,7 @@ pub struct Session {
     pub id: SessionId,
     pub label: String,
     pub model: String,
+    pub role: AgentRole,
     pub messages: Vec<ChatMessage>,
     pub limits: SessionLimits,
     pub context_summary: Option<String>,
@@ -68,11 +72,19 @@ impl Session {
             id: SessionId::fresh(),
             label: label.into(),
             model: model.into(),
+            role: AgentRole::default(),
             messages: Vec::new(),
             limits: SessionLimits::default(),
             context_summary: None,
             context_summary_upto: 0,
         }
+    }
+
+    /// Set the role while keeping every other existing field. Used by the
+    /// session switcher; `Session::new` itself stays Coder and unchanged.
+    pub fn with_role(mut self, role: AgentRole) -> Self {
+        self.role = role;
+        self
     }
 }
 
@@ -107,6 +119,7 @@ pub enum AgentEvent {
         latency_ms: u64,
         iteration: u32,
         spent_usd: f64,
+        cached_tokens: u32,
     },
     BudgetExceeded {
         spent: f64,
@@ -405,7 +418,8 @@ pub fn mark_approval(items: &mut [TranscriptItem], id: ApprovalId, decision: App
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveWork, AgentEvent, ApprovalHandle, TranscriptItem, apply_agent_event, mark_approval,
+        ActiveWork, AgentEvent, AgentRole, ApprovalHandle, Session, TranscriptItem,
+        apply_agent_event, mark_approval,
     };
     use crate::security::{ApprovalDecision, ApprovalId};
 
@@ -530,5 +544,18 @@ mod tests {
             Some(TranscriptItem::Assistant(text))
                 if text.contains("API key was rejected")
         ));
+    }
+
+    #[test]
+    fn new_session_defaults_to_coder_role() {
+        assert_eq!(Session::new("x", "y").role, AgentRole::Coder);
+    }
+
+    #[test]
+    fn with_role_changes_the_role_and_keeps_two_arg_new() {
+        assert_eq!(
+            Session::new("x", "y").with_role(AgentRole::Reviewer).role,
+            AgentRole::Reviewer
+        );
     }
 }

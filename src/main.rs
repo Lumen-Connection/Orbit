@@ -8,6 +8,7 @@ mod coder;
 mod context;
 mod diagnostics;
 mod media;
+mod pipeline;
 mod providers;
 mod runner;
 mod secure_store;

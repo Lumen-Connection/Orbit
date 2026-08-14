@@ -97,6 +97,36 @@ pub fn build_digest(store: &OrbitStore, session: &SessionId, project_name: &str)
         }
     }
 
+    let contract =
+        crate::pipeline::contract::ContractStore::open(store.dir.parent().unwrap_or(&store.dir));
+    if let Some(plan) = contract.planner().ok().flatten() {
+        body.push_str("\nAcceptance criteria:\n");
+        if plan.acceptance_criteria.is_empty() {
+            body.push_str("- (none)\n");
+        } else {
+            for ac in &plan.acceptance_criteria {
+                body.push_str(&format!("- [{id}] {text}\n", id = ac.id, text = ac.text));
+            }
+        }
+        if !plan.scope.is_empty() {
+            body.push_str(&format!("Scope: {}\n", plan.scope));
+        }
+        if !plan.non_goals.is_empty() {
+            body.push_str(&format!("Non-goals: {}\n", plan.non_goals));
+        }
+    }
+    if let Some(coder) = contract.coder().ok().flatten()
+        && (!coder.lint_results.is_empty() || !coder.test_results.is_empty())
+    {
+        body.push_str("\nVerification results:\n");
+        if !coder.lint_results.is_empty() {
+            body.push_str(&format!("{}\n", coder.lint_results));
+        }
+        if !coder.test_results.is_empty() {
+            body.push_str(&format!("{}\n", coder.test_results));
+        }
+    }
+
     body.push_str(&format!("\nRecent findings ({}):\n", findings.len()));
     if findings.is_empty() {
         body.push_str("- (none)\n");
@@ -236,19 +266,25 @@ fn trim_to_cap(text: &mut String, cap: usize) {
         return;
     }
     let max_chars = cap.saturating_mul(4);
+    let cutoff = max_chars.saturating_sub(80);
     if text.chars().count() <= max_chars {
         return;
     }
-    let kept: String = text.chars().take(max_chars.saturating_sub(80)).collect();
-    *text = format!(
-        "{kept}\n\n[digest truncated to stay under {cap} tokens]\n=== END OF CONTEXT ===\n"
-    );
+    // Cut on the last newline before the cutoff so we never split a decision or
+    // finding mid-entry: the kept text always ends at a complete line. Fall back
+    // to the raw character cutoff if there is no earlier newline.
+    let kept_upto: String = text.chars().take(cutoff).collect();
+    let end_line = kept_upto.rfind('\n').map(|i| i + 1).unwrap_or(cutoff);
+    let kept: String = text.chars().take(end_line).collect();
+    *text =
+        format!("{kept}\n[digest truncated to stay under {cap} tokens]\n=== END OF CONTEXT ===\n");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::store::{Decision, OrbitStore, SessionRecord, TouchedFile};
+    use crate::context::store::{Decision, OrbitStore, SessionRecord, TaskStatus, TouchedFile};
+    use crate::session::SessionId;
     use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
@@ -286,6 +322,7 @@ mod tests {
             at: Utc.with_ymd_and_hms(2026, 8, 12, 14, 40, 0).unwrap(),
             model: "gpt-5.6-sol".into(),
             session: "implementation".into(),
+            role: "Coder".into(),
             decision: "Use rusqlite.".into(),
             rationale: String::new(),
             files: Vec::new(),
@@ -371,6 +408,7 @@ mod tests {
                 at: Utc.with_ymd_and_hms(2026, 8, 12, 10, i, 0).unwrap(),
                 model: "m".into(),
                 session: "s".into(),
+                role: "Coder".into(),
                 decision: "x".repeat(200),
                 rationale: String::new(),
                 files: Vec::new(),
@@ -384,5 +422,67 @@ mod tests {
             digest.token_estimate
         );
         assert!(digest.text.contains("truncated") || digest.token_estimate <= 200);
+    }
+
+    #[test]
+    fn trim_never_ends_mid_line() {
+        // A trimmed digest must not end with a partial entry line: the text
+        // always stops at a newline before the truncation marker.
+        let mut text = String::new();
+        for i in 0..40 {
+            text.push_str(&format!("line {i}: {}\n", "word ".repeat(30)));
+        }
+        trim_to_cap(&mut text, 60);
+        let before_marker = text
+            .split("[digest truncated")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        // The last line before the marker should be a complete entry ending in \n
+        assert!(
+            before_marker.ends_with('\n'),
+            "trimmed digest must end with a complete line, got: …{before_marker:?}"
+        );
+        assert!(
+            !before_marker.ends_with("word"),
+            "partial line leaked through"
+        );
+    }
+
+    #[test]
+    fn coder_digest_includes_planner_tasks_decision_and_acs() {
+        let (tmp, mut store) = root();
+        let root = tmp.path().join("proj");
+        crate::pipeline::contract::ContractStore::open(&root)
+            .write_planner(&crate::pipeline::contract::PlannerOutput {
+                tasks: vec!["index chats".into()],
+                decision: "Reuse the FTS table.".into(),
+                acceptance_criteria: vec![crate::pipeline::contract::AcceptanceCriterion {
+                    id: "AC1".into(),
+                    text: "Ctrl+K focuses search".into(),
+                }],
+                scope: "sidebar".into(),
+                non_goals: "folders".into(),
+            })
+            .unwrap();
+        store
+            .append_decision(Decision {
+                at: Utc::now(),
+                model: "planner".into(),
+                session: "plan".into(),
+                role: "Architect".into(),
+                decision: "Reuse the FTS table.".into(),
+                rationale: String::new(),
+                files: Vec::new(),
+                pinned: true,
+            })
+            .unwrap();
+        store
+            .upsert_task(None, TaskStatus::Open, "index chats".into())
+            .unwrap();
+        let digest = build_digest(&store, &SessionId::new("coder"), "orbit");
+        assert!(digest.text.contains("Reuse the FTS table."));
+        assert!(digest.text.contains("index chats"));
+        assert!(digest.text.contains("[AC1] Ctrl+K focuses search"));
     }
 }

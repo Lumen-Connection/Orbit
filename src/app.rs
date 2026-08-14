@@ -863,6 +863,7 @@ impl App {
                 tools: Vec::new(),
                 temperature: None,
                 max_output_tokens: None,
+                system_cache_chars: 0,
             };
             let mut stream = match provider.stream_chat(request, cancel.clone()).await {
                 Ok(stream) => stream,
@@ -1171,6 +1172,7 @@ impl App {
                 tools: Vec::new(),
                 temperature: None,
                 max_output_tokens: None,
+                system_cache_chars: 0,
             };
             let mut stream = match provider.stream_chat(request, cancel.clone()).await {
                 Ok(stream) => stream,
