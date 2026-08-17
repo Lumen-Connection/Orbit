@@ -146,8 +146,14 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         std::fs::write(root.join("ok.txt"), "project-ok\n").unwrap();
-        let outside = tempfile::TempDir::new().unwrap();
-        let secret = outside.path().join("secret.txt");
+        // TempDir often lives under /tmp, which Strict still grants. Put the
+        // secret under $HOME (or /var/tmp) so it is outside every allow rule.
+        let outside_dir = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+            .join(format!("orbit-landlock-{}", std::process::id()));
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let secret = outside_dir.join("secret.txt");
         std::fs::write(&secret, "secret\n").unwrap();
 
         let mut ok = Command::new("cat");
@@ -161,6 +167,7 @@ mod tests {
         bad.arg(&secret).current_dir(root);
         apply_to_tokio(&mut bad, SandboxProfile::Strict, root);
         let out = bad.output().await.expect("spawn cat outside");
+        let _ = std::fs::remove_dir_all(&outside_dir);
         assert!(
             !out.status.success(),
             "reading outside the project must fail under strict: {:?}",

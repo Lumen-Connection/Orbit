@@ -371,15 +371,17 @@ mod tests {
         // A build emits interleaved stdout/stderr; the report must reflect the
         // actual arrival order, not a race between two pump tasks.
         let (_tmp, ctx) = fixture();
-        let script = if cfg!(windows) {
-            // cmd /c prints to stdout, stderr, then stdout again.
-            "cmd /c echo OUT1 ^& echo ERR1 1>&2 ^& echo OUT2"
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd",
+                vec!["/c".into(), "echo OUT1 & echo ERR1 1>&2 & echo OUT2".into()],
+            )
         } else {
-            "sh -c 'echo OUT1; echo ERR1 >&2; echo OUT2'"
+            (
+                "sh",
+                vec!["-c".into(), "echo OUT1; echo ERR1 >&2; echo OUT2".into()],
+            )
         };
-        let mut parts = script.split_whitespace();
-        let program = parts.next().unwrap();
-        let args: Vec<String> = parts.map(|s| s.to_string()).collect();
         let out = RunCommand
             .execute(serde_json::json!({"program": program, "args": args}), &ctx)
             .await
