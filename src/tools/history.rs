@@ -155,6 +155,7 @@ mod tests {
             run_starts: None,
             db: Some(db),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
             budget_usd: None,
         };
         (tmp, ctx, project_b.id)

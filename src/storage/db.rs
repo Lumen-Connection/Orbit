@@ -17,6 +17,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (3, include_str!("../../migrations/0003_project_hidden.sql")),
     (4, include_str!("../../migrations/0004_history_fts.sql")),
     (5, include_str!("../../migrations/0005_session_role.sql")),
+    (6, include_str!("../../migrations/0006_sandbox_profile.sql")),
 ];
 
 #[derive(Clone)]
@@ -31,6 +32,7 @@ pub struct StoredSession {
     pub label: String,
     pub model_id: String,
     pub role: AgentRole,
+    pub sandbox_profile: crate::security::sandbox::SandboxProfile,
     #[allow(dead_code)]
     pub last_active_at: String,
 }
@@ -220,6 +222,20 @@ impl Db {
                     role = excluded.role,
                     last_active_at = excluded.last_active_at",
                 params![id.as_str(), project_id, label, model, role, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_session_sandbox(
+        &self,
+        id: &SessionId,
+        profile: crate::security::sandbox::SandboxProfile,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE session SET sandbox_profile = ?1 WHERE id = ?2",
+                params![profile.id(), id.as_str()],
             )?;
             Ok(())
         })
@@ -581,7 +597,9 @@ impl Db {
     pub fn load_sessions(&self, project_id: &str) -> Result<Vec<StoredSession>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, label, model_id, COALESCE(role, 'coder'), last_active_at FROM session
+                "SELECT id, label, model_id, COALESCE(role, 'coder'), last_active_at,
+                        COALESCE(sandbox_profile, 'off')
+                 FROM session
                  WHERE project_id = ?1 ORDER BY last_active_at DESC",
             )?;
             let rows = stmt.query_map(params![project_id], |row| {
@@ -591,6 +609,9 @@ impl Db {
                     model_id: row.get(2)?,
                     role: AgentRole::from_id(&row.get::<_, String>(3)?),
                     last_active_at: row.get(4)?,
+                    sandbox_profile: crate::security::sandbox::SandboxProfile::parse(
+                        &row.get::<_, String>(5)?,
+                    ),
                 })
             })?;
             let mut out = Vec::new();
@@ -880,7 +901,7 @@ mod tests {
             .with_conn(|conn| {
                 let n: i32 =
                     conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))?;
-                assert_eq!(n, 5);
+                assert_eq!(n, 6);
                 Ok(())
             })
             .unwrap();
@@ -933,6 +954,20 @@ mod tests {
         let loaded = db.load_sessions(&project.id).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].role, AgentRole::Reviewer);
+    }
+
+    #[test]
+    fn sandbox_profile_round_trips_through_persistence() {
+        let (_tmp, db, project) = db();
+        let id = SessionId::new("sbx-s1");
+        db.upsert_session(&project.id, &id, "lab", "m").unwrap();
+        db.set_session_sandbox(&id, crate::security::sandbox::SandboxProfile::Workspace)
+            .unwrap();
+        let loaded = db.load_sessions(&project.id).unwrap();
+        assert_eq!(
+            loaded[0].sandbox_profile,
+            crate::security::sandbox::SandboxProfile::Workspace
+        );
     }
 
     #[test]

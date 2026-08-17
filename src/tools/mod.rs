@@ -69,6 +69,7 @@ pub struct ToolContext {
     pub db: Option<std::sync::Arc<crate::storage::db::Db>>,
     pub subagents: Option<std::sync::Arc<crate::session::subagent::SubagentHost>>,
     pub budget_usd: Option<f64>,
+    pub sandbox_profile: crate::security::sandbox::SandboxProfile,
 }
 
 impl ToolContext {
@@ -92,6 +93,7 @@ impl ToolContext {
             db: None,
             subagents: None,
             budget_usd: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         }
     }
 }

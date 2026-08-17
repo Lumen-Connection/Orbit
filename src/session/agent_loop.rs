@@ -54,6 +54,7 @@ pub struct TurnDeps {
     pub run_env: RunEnv,
     pub user_images: Vec<crate::providers::ImageAttachment>,
     pub subagents: Option<std::sync::Arc<crate::session::subagent::SubagentHost>>,
+    pub sandbox_profile: crate::security::sandbox::SandboxProfile,
 }
 
 #[derive(Clone, Default)]
@@ -561,6 +562,7 @@ fn bind_ctx(
         db: deps.db.clone(),
         subagents: deps.subagents.clone(),
         budget_usd: deps.budget_usd,
+        sandbox_profile: deps.sandbox_profile,
     }
 }
 
@@ -766,10 +768,12 @@ fn persist_patch(deps: &TurnDeps, patch: &crate::workspace::FilePatch) {
     let label = deps.session_label.clone();
     let model = deps.session_model.clone();
     let role = deps.session_role.id().to_string();
+    let sandbox = deps.sandbox_profile;
     let patch = patch.clone();
     tokio::task::spawn_blocking(move || {
         let _ = db.upsert_project(&project);
         let _ = db.upsert_session_with_role(&project.id, &sid, &label, &model, &role);
+        let _ = db.set_session_sandbox(&sid, sandbox);
         if let Err(e) = db.upsert_file_change(&project.id, &sid, &patch) {
             tracing::warn!("could not persist file change: {e:#}");
         }
@@ -785,6 +789,7 @@ fn persist_messages(deps: &TurnDeps, messages: &[ChatMessage]) {
     let label = deps.session_label.clone();
     let model = deps.session_model.clone();
     let role = deps.session_role.id().to_string();
+    let sandbox = deps.sandbox_profile;
     let messages = messages.to_vec();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = db.upsert_project(&project) {
@@ -795,6 +800,7 @@ fn persist_messages(deps: &TurnDeps, messages: &[ChatMessage]) {
             tracing::warn!("could not persist session: {e:#}");
             return;
         }
+        let _ = db.set_session_sandbox(&sid, sandbox);
         if let Err(e) = db.replace_messages(&sid, &messages) {
             tracing::warn!("could not persist messages: {e:#}");
         }
@@ -1429,6 +1435,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         (deps, rx, approvals)
     }
@@ -1596,6 +1603,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let session = Arc::new(tokio::sync::Mutex::new(Session::new("t", "slow")));
         let handle = tokio::spawn(run_turn(session, Some("go".into()), deps));
@@ -1639,6 +1647,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let call = ToolCall {
             id: "w".into(),
@@ -1701,6 +1710,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let call = ToolCall {
             id: "s".into(),
@@ -1776,6 +1786,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let call = ToolCall {
             id: "w".into(),
@@ -1841,6 +1852,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let call = ToolCall {
             id: "w".into(),
@@ -1961,6 +1973,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let session = Arc::new(tokio::sync::Mutex::new(Session::new("t", "write-ack")));
         let task = tokio::spawn(run_turn(session.clone(), Some("rename auth".into()), deps));
@@ -2017,6 +2030,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let call = ToolCall {
             id: "d".into(),
@@ -2071,6 +2085,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         let call = ToolCall {
             id: "c".into(),
@@ -2196,6 +2211,7 @@ mod tests {
             run_env: super::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         };
         // First request costs 100*0.01 + 50*0.02 = 2.0, which exceeds 0.50
         // after the first stream. Next loop iteration waits for a raise.

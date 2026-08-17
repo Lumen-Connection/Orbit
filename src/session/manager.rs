@@ -47,12 +47,14 @@ pub struct LiveSession {
     pub parent_id: Option<SessionId>,
     pub parent_label: Option<String>,
     pub isolation: crate::session::worktree::Isolation,
+    pub sandbox_profile: crate::security::sandbox::SandboxProfile,
 }
 
 impl LiveSession {
     pub fn from_session(session: Session) -> Self {
         let budget_usd = session.limits.budget_usd;
         let role = session.role;
+        let sandbox_profile = session.sandbox_profile;
         Self {
             id: session.id.clone(),
             label: session.label.clone(),
@@ -82,6 +84,7 @@ impl LiveSession {
             parent_id: None,
             parent_label: None,
             isolation: crate::session::worktree::Isolation::None,
+            sandbox_profile,
         }
     }
 
@@ -534,6 +537,7 @@ mod tests {
             run_env: crate::session::agent_loop::RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         }
     }
 

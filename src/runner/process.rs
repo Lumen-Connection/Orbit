@@ -82,6 +82,7 @@ pub struct ProcessRegistry {
     pub tx: Sender<RunnerEvent>,
     pub rx: Receiver<RunnerEvent>,
     pub restart_pending: HashMap<String, (RunConfig, PathBuf)>,
+    pub sandbox: crate::security::sandbox::SandboxProfile,
 }
 
 impl Default for ProcessRegistry {
@@ -93,6 +94,7 @@ impl Default for ProcessRegistry {
             tx,
             rx,
             restart_pending: HashMap::new(),
+            sandbox: crate::security::sandbox::SandboxProfile::Off,
         }
     }
 }
@@ -176,10 +178,11 @@ impl ProcessRegistry {
             },
         );
         let events = self.tx.clone();
+        let sandbox = self.sandbox;
         if let Some(rt) = rt {
-            rt.spawn(run_loop(config, cwd, ctrl_rx, events));
+            rt.spawn(run_loop(config, cwd, ctrl_rx, events, sandbox));
         } else {
-            tokio::spawn(run_loop(config, cwd, ctrl_rx, events));
+            tokio::spawn(run_loop(config, cwd, ctrl_rx, events, sandbox));
         }
         Ok(())
     }
@@ -276,6 +279,7 @@ async fn run_loop(
     cwd: PathBuf,
     mut ctrl: tokio_mpsc::Receiver<RunControl>,
     events: Sender<RunnerEvent>,
+    sandbox: crate::security::sandbox::SandboxProfile,
 ) {
     let id = config.id.clone();
     let mut cmd = Command::new(&config.program);
@@ -288,6 +292,7 @@ async fn run_loop(
     for (k, v) in &config.env {
         cmd.env(k, v);
     }
+    crate::security::sandbox::apply_to_tokio(&mut cmd, sandbox, &cwd);
 
     let mut child = match cmd.group_spawn() {
         Ok(child) => child,

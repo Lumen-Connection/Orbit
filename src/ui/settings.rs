@@ -406,9 +406,44 @@ fn render_limits(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Sandbox");
+            let linux = cfg!(target_os = "linux");
+            ui.add_enabled_ui(linux, |ui| {
+                let label = state.settings.sandbox_profile.label();
+                egui::ComboBox::from_id_salt("settings_sandbox")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for profile in [
+                            crate::security::sandbox::SandboxProfile::Off,
+                            crate::security::sandbox::SandboxProfile::Workspace,
+                            crate::security::sandbox::SandboxProfile::Strict,
+                        ] {
+                            dirty |= ui
+                                .selectable_value(
+                                    &mut state.settings.sandbox_profile,
+                                    profile,
+                                    profile.label(),
+                                )
+                                .changed();
+                        }
+                    });
+            });
+        });
+        ui.label(
+            egui::RichText::new(if cfg!(target_os = "linux") {
+                crate::security::sandbox::probe().display()
+            } else {
+                "Landlock is Linux-only. This control does nothing on Windows.".into()
+            })
+            .small()
+            .color(crate::ui::theme::tokens(ui).text_muted),
+        );
+        ui.add_space(8.0);
         ui.label(
             egui::RichText::new(
-                "New sessions pick up these limits. Changing the timeout rebuilds the API client.",
+                "New sessions pick up these limits. Changing the timeout rebuilds the API client. \
+                 A cloned [sandbox] profile can only tighten this machine default, never loosen it.",
             )
             .small()
             .color(crate::ui::theme::tokens(ui).text_muted),

@@ -234,6 +234,7 @@ mod tests {
             run_starts: None,
             db: None,
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
             budget_usd: None,
         };
         Some((tmp, ctx))

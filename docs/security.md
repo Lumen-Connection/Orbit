@@ -1,10 +1,34 @@
 # Security
 
-## There is no strong sandbox
+## Sandbox depends on the OS
 
-Orbit runs on your desktop, as you. File tools stay inside the project root
+**Windows:** there is no kernel jail. File tools stay inside the project root
 (after symlink resolution). Commands run with `Command::new(program).args(...)`
-in that root. That is **containment and policy**, not a jail.
+in that root. That is **containment and policy**, not a jail. The sandbox
+selector in Settings is disabled and says so.
+
+**Linux:** child processes started by `run_command` and by run configs can be
+confined with [Landlock](https://landlock.io). The ruleset is applied between
+`fork` and `exec` of the child, never on the GUI process. Profiles:
+
+| Profile | Read | Write |
+|---|---|---|
+| `off` (machine default) | unrestricted | unrestricted |
+| `workspace` | project + toolchain + system paths | project, `/tmp`, `$CARGO_HOME`, `~/.cache` |
+| `strict` | project + system paths | project, `/tmp` |
+
+Restricted profiles do not grant `~/.ssh`, `~/.aws`, `~/.config/orbit`, or
+the keyring socket. The UI reports the ABI actually obtained (`Active (ABI n)`),
+or `Unavailable: kernel < 5.13` when Landlock cannot apply. A sandbox that
+claims to be on while the kernel ignores it would be worse than no sandbox.
+
+The profile is frozen for the life of a session. `.orbit/config.toml`
+`[sandbox] profile = "..."` is commitable and **may only tighten** the
+machine default from Settings. A cloned `profile = "off"` cannot turn off
+someone else's local sandbox.
+
+TCP `bind`/`connect` restrictions are a bonus on ABI v4 (kernel 6.7+) in the
+`strict` profile, not a promise of every profile.
 
 A determined model-plus-user-approval pair can still damage the machine. The
 denylist blocks a short list of catastrophic shapes (`rm -rf /`, `format`,
@@ -38,7 +62,8 @@ the role matrix, human approval, and the denylist.
 ## What we do not promise
 
 - Isolation from other processes or the rest of your home directory once a
-  command is approved.
+  command is approved, except the Landlock confinement of child processes on
+  Linux when a restricted profile is active and the kernel ABI is available.
 - A guarantee that every dangerous command is denylisted.
 - Protection if you allowlist `bash` / `powershell` yourself (those forms
   that take a `-c` string are denied absolutely; do not look for workarounds).

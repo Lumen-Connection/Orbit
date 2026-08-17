@@ -187,6 +187,7 @@ impl Tool for StartRun {
         let mut runner = runner
             .lock()
             .map_err(|_| ToolError::Message("runner lock poisoned".into()))?;
+        runner.sandbox = ctx.sandbox_profile;
         if runner.is_running(&config.id) {
             runner.request_restart(config.clone(), project.canonical_root.clone(), None);
             return Ok(ToolOutcome {

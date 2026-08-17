@@ -67,6 +67,7 @@ pub struct Session {
     pub context_summary: Option<String>,
     pub context_summary_upto: usize,
     pub extra_system: Option<String>,
+    pub sandbox_profile: crate::security::sandbox::SandboxProfile,
 }
 
 impl Session {
@@ -81,6 +82,7 @@ impl Session {
             context_summary: None,
             context_summary_upto: 0,
             extra_system: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         }
     }
 

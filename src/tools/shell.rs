@@ -86,6 +86,13 @@ Never pass a shell string. Commands need approval unless already allowed."
             .kill_on_drop(true)
             .stdin(Stdio::null());
         apply_filtered_env(&mut child_cmd);
+        if let Some(project) = ctx.project.as_ref() {
+            crate::security::sandbox::apply_to_tokio(
+                &mut child_cmd,
+                ctx.sandbox_profile,
+                &project.canonical_root,
+            );
+        }
 
         let display = cmd.display();
         let proc_cancel = CancellationToken::new();
@@ -296,6 +303,7 @@ mod tests {
             run_starts: None,
             db: None,
             subagents: None,
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
             budget_usd: None,
         };
         (tmp, ctx)

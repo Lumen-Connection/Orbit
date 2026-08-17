@@ -55,6 +55,9 @@ pub struct AppSettings {
     /// Base URL for an OpenAI-compatible server (`/v1`). Empty disables it.
     #[serde(default)]
     pub openai_compat_base_url: String,
+    /// Machine-local sandbox default. A cloned `[sandbox] profile` may only tighten this.
+    #[serde(default)]
+    pub sandbox_profile: crate::security::sandbox::SandboxProfile,
 }
 
 fn default_model() -> String {
@@ -94,6 +97,7 @@ impl Default for AppSettings {
             motion: MotionPreference::Full,
             context_recent_messages: default_recent_keep(),
             openai_compat_base_url: String::new(),
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         }
     }
 }
@@ -203,6 +207,7 @@ mod tests {
             motion: MotionPreference::Reduced,
             context_recent_messages: 0,
             openai_compat_base_url: String::new(),
+            sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         }
         .sanitized();
         assert_eq!(settings.chat_default_model, DEFAULT_MODEL);

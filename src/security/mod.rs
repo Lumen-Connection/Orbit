@@ -2,6 +2,7 @@ pub mod declared;
 pub mod paths;
 pub mod policy;
 pub mod redact;
+pub mod sandbox;
 
 #[allow(unused_imports)]
 pub use paths::{SecurityError, is_sensitive, resolve_within_root};

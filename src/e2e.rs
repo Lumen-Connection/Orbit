@@ -143,6 +143,7 @@ fn deps(
         run_env: crate::session::agent_loop::RunEnv::default(),
         user_images: Vec::new(),
         subagents: None,
+        sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
     }
 }
 
@@ -337,6 +338,7 @@ async fn skill_created_in_one_session_appears_in_another_sessions_digest() {
         run_starts: None,
         db: None,
         subagents: None,
+        sandbox_profile: crate::security::sandbox::SandboxProfile::Off,
         budget_usd: None,
     };
     let out = crate::tools::skills::ReadSkill

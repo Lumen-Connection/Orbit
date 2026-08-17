@@ -15,6 +15,9 @@ token_cap = 4000
 [budget]
 session_usd = 2.0
 
+[sandbox]
+profile = "workspace"
+
 [[hooks]]
 event = "PreToolUse"
 matcher = "write_file|edit_file|multi_edit"
@@ -41,6 +44,13 @@ in Settings. Editing the command or args invalidates that trust.
 Hooks are **not** a security boundary. A hook that crashes, times out (10s),
 or prints unreadable JSON is treated as allow, with a warning. The role
 matrix and human approval still run first.
+
+## Sandbox
+
+`[sandbox] profile` is `off`, `workspace`, or `strict`. It is commitable, so
+it **can only tighten** the machine default from Settings. A cloned
+`profile = "off"` does not disable a local `workspace` or `strict` default.
+The profile is frozen when a session starts. Landlock applies on Linux only.
 
 ## Budget
 

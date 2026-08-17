@@ -257,6 +257,7 @@ impl Tool for SpawnSubagent {
             run_env: RunEnv::default(),
             user_images: Vec::new(),
             subagents: None,
+            sandbox_profile: ctx.sandbox_profile,
         };
         let result = run_turn(handle.clone(), Some(task), deps).await;
         let spent = child_spent.lock().map(|g| *g).unwrap_or(0.0);

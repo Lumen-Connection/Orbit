@@ -262,6 +262,7 @@ pub struct RestoredSession {
     pub label: String,
     pub model: String,
     pub role: crate::session::AgentRole,
+    pub sandbox_profile: crate::security::sandbox::SandboxProfile,
     pub messages: Vec<ChatMessage>,
     pub spent_usd: f64,
     pub prompt_tokens: u32,
@@ -696,10 +697,19 @@ impl App {
                 let Some(project) = state.coder.project.clone() else {
                     return;
                 };
+                let sandbox = state
+                    .coder
+                    .sessions
+                    .active()
+                    .map(|s| s.sandbox_profile)
+                    .unwrap_or_default();
                 let started = match state.coder.runner.lock() {
-                    Ok(mut runner) => runner
-                        .start(config, project.canonical_root.clone(), Some(&self.rt))
-                        .map_err(|e| e.to_string()),
+                    Ok(mut runner) => {
+                        runner.sandbox = sandbox;
+                        runner
+                            .start(config, project.canonical_root.clone(), Some(&self.rt))
+                            .map_err(|e| e.to_string())
+                    }
                     Err(e) => Err(e.to_string()),
                 };
                 if let Err(e) = started {
@@ -984,6 +994,7 @@ impl App {
             .map(|m| (m.prompt_price, m.completion_price))
             .unwrap_or((None, None));
         let session_role = live.role;
+        let sandbox_profile = live.sandbox_profile;
         let host_provider = provider.clone();
         let deps = TurnDeps {
             provider,
@@ -1039,6 +1050,7 @@ impl App {
                 pending_subagents,
                 subagent_fraction,
             )),
+            sandbox_profile,
         };
         self.rt.spawn(async move {
             let cancel = deps.cancel.clone();
@@ -1308,6 +1320,7 @@ impl App {
             .map(|m| (m.prompt_price, m.completion_price))
             .unwrap_or((None, None));
         let session_role = live.role;
+        let sandbox_profile = live.sandbox_profile;
         let host_provider = provider.clone();
         let spent_now = live.spent_usd;
         let deps = TurnDeps {
@@ -1364,6 +1377,7 @@ impl App {
                 pending_subagents,
                 subagent_fraction,
             )),
+            sandbox_profile,
         };
         self.rt.spawn(async move {
             let cancel = deps.cancel.clone();
@@ -1467,6 +1481,13 @@ impl App {
             &model,
             crate::session::AgentRole::Coder.id(),
         );
+        if let Some(profile) = state.coder.sessions.get_mut(&id).map(|s| s.sandbox_profile) {
+            let db = self.db.clone();
+            let sid = id.clone();
+            self.rt.spawn_blocking(move || {
+                let _ = db.set_session_sandbox(&sid, profile);
+            });
+        }
         refresh_active_handoff(state);
     }
 
@@ -2106,11 +2127,20 @@ fn reset_agent_session(state: &mut MainState, project_name: &str, create_session
 fn apply_session_limits(state: &mut MainState, id: &SessionId) {
     let max_iterations = state.settings.max_iterations;
     let budget = state.settings.session_budget_usd;
+    let machine = state.settings.sandbox_profile;
+    let project = state
+        .coder
+        .project
+        .as_ref()
+        .and_then(|p| crate::security::sandbox::load_project_profile(&p.canonical_root));
+    let sandbox = crate::security::sandbox::effective(machine, project);
     if let Some(live) = state.coder.sessions.get_mut(id) {
         live.budget_usd = budget;
+        live.sandbox_profile = sandbox;
         if let Ok(mut session) = live.handle.try_lock() {
             session.limits.max_iterations = max_iterations;
             session.limits.budget_usd = budget;
+            session.sandbox_profile = sandbox;
         }
     }
 }
@@ -2131,6 +2161,9 @@ fn flush_coder_state(state: &MainState, db: &Db) {
             live.role.id(),
         ) {
             tracing::warn!("could not flush session: {e:#}");
+        }
+        if let Err(e) = db.set_session_sandbox(&live.id, live.sandbox_profile) {
+            tracing::warn!("could not flush sandbox profile: {e:#}");
         }
         if let Ok(session) = live.handle.try_lock() {
             if let Err(e) = db.replace_messages(&session.id, &session.messages) {
@@ -2243,6 +2276,7 @@ fn load_snapshot(db: &Db, project_id: &str) -> anyhow::Result<ProjectSnapshot> {
             label: row.label,
             model: row.model_id,
             role: row.role,
+            sandbox_profile: row.sandbox_profile,
             messages,
             spent_usd: usage.cost_usd,
             prompt_tokens: usage.input_tokens,
@@ -2283,6 +2317,7 @@ fn apply_snapshot(state: &mut MainState, snapshot: ProjectSnapshot) {
         session.context_summary_upto = restored.context_summary_upto;
         session.limits.budget_usd = budget;
         session.limits.max_iterations = max_iterations;
+        session.sandbox_profile = restored.sandbox_profile;
         let mut live = crate::session::manager::LiveSession::from_session(session);
         live.transcript = transcript_from_messages(&restored.messages, &pending);
         live.spent_usd = restored.spent_usd;
