@@ -24,6 +24,17 @@ command.
 - Environment variables whose names contain `KEY`, `TOKEN`, `SECRET`, or
   `PASSWORD` are stripped from child processes.
 
+## Hooks are not a security boundary
+
+`PreToolUse` / `PostToolUse` hooks declared in `.orbit/config.toml` are
+project policy convenience. They run after the role guard and before (or
+after) the tool. A broken hook **fails open**: timeout, empty stdout, or
+unreadable JSON allows the tool and raises a warning. A hook command on the
+absolute denylist never runs and cannot be approved.
+
+Do not treat a hook deny as the product's security boundary. That remains
+the role matrix, human approval, and the denylist.
+
 ## What we do not promise
 
 - Isolation from other processes or the rest of your home directory once a
@@ -31,6 +42,7 @@ command.
 - A guarantee that every dangerous command is denylisted.
 - Protection if you allowlist `bash` / `powershell` yourself (those forms
   that take a `-c` string are denied absolutely; do not look for workarounds).
+- That a project hook will always run, or that a missing hook is a failure.
 
 ## Dependency advisories
 

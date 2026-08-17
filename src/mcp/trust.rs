@@ -1,15 +1,13 @@
 //! MCP server declarations and machine-local trust / risk overrides.
 
 use crate::security::ProposedCommand;
-use crate::security::policy::is_absolutely_denied;
+use crate::security::declared::{self, MachineTrust};
 use crate::storage;
 use crate::tools::ToolRisk;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const TRUST_FILE: &str = "mcp_trust.json";
 const RISK_FILE: &str = "mcp_risk.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,22 +28,7 @@ fn default_true() -> bool {
 
 impl McpServerConfig {
     pub fn fingerprint(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(self.command.as_bytes());
-        hasher.update([0]);
-        for arg in &self.args {
-            hasher.update(arg.as_bytes());
-            hasher.update([0]);
-        }
-        let mut env = self.env.clone();
-        env.sort_by(|a, b| a.0.cmp(&b.0));
-        for (k, v) in env {
-            hasher.update(k.as_bytes());
-            hasher.update(b"=");
-            hasher.update(v.as_bytes());
-            hasher.update([0]);
-        }
-        format!("{:x}", hasher.finalize())
+        declared::fingerprint(&self.command, &self.args, &self.env)
     }
 
     pub fn as_command(&self) -> ProposedCommand {
@@ -64,7 +47,7 @@ impl McpServerConfig {
     }
 
     pub fn is_denied(&self) -> bool {
-        is_absolutely_denied(&self.as_command())
+        crate::security::policy::is_absolutely_denied(&self.as_command())
     }
 }
 
@@ -84,16 +67,11 @@ pub fn load_servers(root: &Path) -> Vec<McpServerConfig> {
 }
 
 pub fn is_trusted(config: &McpServerConfig) -> bool {
-    load_map(TRUST_FILE)
-        .get(&config.fingerprint())
-        .copied()
-        .unwrap_or(false)
+    MachineTrust::MCP.is_trusted(&config.fingerprint())
 }
 
 pub fn trust_on_this_machine(config: &McpServerConfig) -> Result<(), String> {
-    let mut map = load_map(TRUST_FILE);
-    map.insert(config.fingerprint(), true);
-    save_map(TRUST_FILE, &map)
+    MachineTrust::MCP.trust(&config.fingerprint())
 }
 
 pub fn risk_override(qualified: &str) -> Option<ToolRisk> {
@@ -119,22 +97,6 @@ fn data_file(name: &str) -> PathBuf {
     storage::data_dir()
         .map(|dir| dir.join(name))
         .unwrap_or_else(|| PathBuf::from(name))
-}
-
-fn load_map(name: &str) -> BTreeMap<String, bool> {
-    let Ok(bytes) = std::fs::read(data_file(name)) else {
-        return BTreeMap::new();
-    };
-    serde_json::from_slice(&bytes).unwrap_or_default()
-}
-
-fn save_map(name: &str, map: &BTreeMap<String, bool>) -> Result<(), String> {
-    let path = data_file(name);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let bytes = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
 fn load_string_map(name: &str) -> BTreeMap<String, String> {

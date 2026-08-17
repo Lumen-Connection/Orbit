@@ -201,6 +201,7 @@ pub enum SettingsTab {
     Appearance,
     Shortcuts,
     Mcp,
+    Hooks,
     Anthropic,
     Local,
     About,

@@ -408,6 +408,18 @@ async fn dispatch_tool_inner(call: &ToolCall, deps: &TurnDeps, emit_started: boo
         );
     }
 
+    let hook_notes = match apply_pre_hooks(call, deps).await {
+        Ok(notes) => notes,
+        Err(reason) => {
+            return finish_tool(
+                deps,
+                call,
+                format!("Blocked by project hook: {reason}"),
+                true,
+            );
+        }
+    };
+
     let patches = Arc::new(Mutex::new(Vec::new()));
     let mut ctx = bind_ctx(deps, patches.clone(), false);
     let mut outcome = tool.execute(call.arguments.clone(), &ctx).await;
@@ -425,23 +437,30 @@ async fn dispatch_tool_inner(call: &ToolCall, deps: &TurnDeps, emit_started: boo
             ctx.allow_sensitive = true;
             outcome = tool.execute(call.arguments.clone(), &ctx).await;
         } else {
-            return finish_tool(deps, call, format!("Denied read of `{path}`."), true);
+            return finish_executed(
+                deps,
+                call,
+                format!("Denied read of `{path}`."),
+                true,
+                &hook_notes,
+            )
+            .await;
         }
     }
 
     if tool.risk() == ToolRisk::Executing {
         if call.name == "spawn_subagent" {
-            return dispatch_subagent(call, deps, tool.as_ref(), &summary).await;
+            return dispatch_subagent(call, deps, tool.as_ref(), &summary, &hook_notes).await;
         }
         if call.name == "start_run" || call.name == "stop_run" {
-            return dispatch_run_control(call, deps, tool.as_ref(), &summary).await;
+            return dispatch_run_control(call, deps, tool.as_ref(), &summary, &hook_notes).await;
         }
-        return dispatch_command(call, deps, &summary).await;
+        return dispatch_command(call, deps, &summary, &hook_notes).await;
     }
 
     if tool.risk() == ToolRisk::Mutating {
         if let Err(e) = &outcome {
-            return finish_tool(deps, call, e.to_string(), true);
+            return finish_executed(deps, call, e.to_string(), true, &hook_notes).await;
         }
         let proposed = patches.lock().ok().and_then(|p| p.first().cloned());
         if let Some(patch) = &proposed {
@@ -457,27 +476,42 @@ async fn dispatch_tool_inner(call: &ToolCall, deps: &TurnDeps, emit_started: boo
                         {
                             record_touch(deps, &patch.relative_path);
                             persist_patch(deps, &patch);
-                            finish_tool(
+                            finish_executed(
                                 deps,
                                 call,
                                 format!("Applied edit to {}.", patch.relative_path.display()),
                                 false,
+                                &hook_notes,
                             )
+                            .await
                         }
-                        Ok(()) => finish_tool(
-                            deps,
-                            call,
-                            format!(
-                                "Patch not applied ({:?}) for {}.",
-                                patch.status,
-                                patch.relative_path.display()
-                            ),
-                            true,
-                        ),
-                        Err(e) => finish_tool(deps, call, e.to_string(), true),
+                        Ok(()) => {
+                            finish_executed(
+                                deps,
+                                call,
+                                format!(
+                                    "Patch not applied ({:?}) for {}.",
+                                    patch.status,
+                                    patch.relative_path.display()
+                                ),
+                                true,
+                                &hook_notes,
+                            )
+                            .await
+                        }
+                        Err(e) => {
+                            finish_executed(deps, call, e.to_string(), true, &hook_notes).await
+                        }
                     }
                 } else {
-                    finish_tool(deps, call, "No patch was produced.".into(), true)
+                    finish_executed(
+                        deps,
+                        call,
+                        "No patch was produced.".into(),
+                        true,
+                        &hook_notes,
+                    )
+                    .await
                 }
             }
             ApprovalDecision::Denied => {
@@ -485,14 +519,21 @@ async fn dispatch_tool_inner(call: &ToolCall, deps: &TurnDeps, emit_started: boo
                     patch.status = crate::workspace::PatchStatus::Rejected;
                     persist_patch(deps, &patch);
                 }
-                finish_tool(deps, call, "The user denied this change.".into(), true)
+                finish_executed(
+                    deps,
+                    call,
+                    "The user denied this change.".into(),
+                    true,
+                    &hook_notes,
+                )
+                .await
             }
         };
     }
 
     match outcome {
-        Ok(out) => finish_tool(deps, call, out.content, false),
-        Err(e) => finish_tool(deps, call, e.to_string(), true),
+        Ok(out) => finish_executed(deps, call, out.content, false, &hook_notes).await,
+        Err(e) => finish_executed(deps, call, e.to_string(), true, &hook_notes).await,
     }
 }
 
@@ -790,6 +831,7 @@ async fn dispatch_run_control(
     deps: &TurnDeps,
     tool: &dyn crate::tools::Tool,
     summary: &str,
+    hook_notes: &[String],
 ) -> ChatMessage {
     if call.name == "start_run"
         && let Some(id) = call.arguments.get("config_id").and_then(|v| v.as_str())
@@ -825,12 +867,17 @@ async fn dispatch_run_control(
     let mut ctx = bind_ctx(deps, patches, false);
     ctx.allow_execute = true;
     match tool.execute(call.arguments.clone(), &ctx).await {
-        Ok(out) => finish_tool(deps, call, out.content, false),
-        Err(e) => finish_tool(deps, call, e.to_string(), true),
+        Ok(out) => finish_executed(deps, call, out.content, false, hook_notes).await,
+        Err(e) => finish_executed(deps, call, e.to_string(), true, hook_notes).await,
     }
 }
 
-async fn dispatch_command(call: &ToolCall, deps: &TurnDeps, summary: &str) -> ChatMessage {
+async fn dispatch_command(
+    call: &ToolCall,
+    deps: &TurnDeps,
+    summary: &str,
+    hook_notes: &[String],
+) -> ChatMessage {
     let cmd = match ProposedCommand::from_value(&call.arguments) {
         Ok(cmd) => cmd,
         Err(e) => return finish_tool(deps, call, e, true),
@@ -899,8 +946,127 @@ async fn dispatch_command(call: &ToolCall, deps: &TurnDeps, summary: &str) -> Ch
         .execute(&call.name, call.arguments.clone(), &ctx)
         .await
     {
-        Ok(out) => finish_tool(deps, call, out.content, false),
-        Err(e) => finish_tool(deps, call, e.to_string(), true),
+        Ok(out) => finish_executed(deps, call, out.content, false, hook_notes).await,
+        Err(e) => finish_executed(deps, call, e.to_string(), true, hook_notes).await,
+    }
+}
+
+async fn finish_executed(
+    deps: &TurnDeps,
+    call: &ToolCall,
+    output: String,
+    is_error: bool,
+    hook_notes: &[String],
+) -> ChatMessage {
+    apply_post_hooks(call, deps).await;
+    let output = if hook_notes.is_empty() {
+        output
+    } else {
+        format!("{}\n\n{output}", hook_notes.join("\n"))
+    };
+    finish_tool(deps, call, output, is_error)
+}
+
+async fn apply_pre_hooks(call: &ToolCall, deps: &TurnDeps) -> Result<Vec<String>, String> {
+    let hooks = crate::hooks::load_hooks(&deps.project.canonical_root);
+    if hooks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let payload = crate::hooks::HookPayload {
+        event: crate::hooks::trust::HookEvent::PreToolUse.as_str().into(),
+        tool_name: call.name.clone(),
+        arguments: call.arguments.clone(),
+        session_id: deps.session_id.as_str().to_string(),
+        role: deps.session_role.label().to_string(),
+        project_root: deps.project.canonical_root.display().to_string(),
+    };
+    let mut warnings = Vec::new();
+    for hook in hooks {
+        if hook.kind() != Some(crate::hooks::trust::HookEvent::PreToolUse)
+            || !hook.matches_tool(&call.name)
+        {
+            continue;
+        }
+        if hook.is_denied() {
+            let msg = format!(
+                "hook `{}` is blocked by the command denylist",
+                hook.display()
+            );
+            crate::hooks::record_last(&hook.fingerprint(), "denied", Some(msg.clone()));
+            tracing::warn!("{msg}");
+            warnings.push(msg);
+            continue;
+        }
+        if !crate::hooks::is_enabled(&hook) {
+            continue;
+        }
+        if !crate::hooks::is_trusted(&hook) {
+            let decision = request_approval(
+                deps,
+                "hook",
+                format!("Trust project hook `{}`?", hook.display()),
+                None,
+                None,
+            )
+            .await;
+            if decision != ApprovalDecision::Approved {
+                let msg = format!("hook `{}` was not trusted; skipping", hook.display());
+                crate::hooks::record_last(&hook.fingerprint(), "untrusted", Some(msg.clone()));
+                warnings.push(msg);
+                continue;
+            }
+            if let Err(e) = crate::hooks::trust_on_this_machine(&hook) {
+                warnings.push(format!("could not persist hook trust: {e}"));
+            }
+        }
+        match crate::hooks::run_hook(&hook, &payload, &deps.cancel).await {
+            crate::hooks::HookRun::Allow { warning } => {
+                crate::hooks::record_last(&hook.fingerprint(), "allow", warning.clone());
+                if let Some(warning) = warning {
+                    warnings.push(warning);
+                }
+            }
+            crate::hooks::HookRun::Deny { reason } => {
+                crate::hooks::record_last(&hook.fingerprint(), "deny", Some(reason.clone()));
+                return Err(reason);
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+async fn apply_post_hooks(call: &ToolCall, deps: &TurnDeps) {
+    let hooks = crate::hooks::load_hooks(&deps.project.canonical_root);
+    let payload = crate::hooks::HookPayload {
+        event: crate::hooks::trust::HookEvent::PostToolUse.as_str().into(),
+        tool_name: call.name.clone(),
+        arguments: call.arguments.clone(),
+        session_id: deps.session_id.as_str().to_string(),
+        role: deps.session_role.label().to_string(),
+        project_root: deps.project.canonical_root.display().to_string(),
+    };
+    for hook in hooks {
+        if hook.kind() != Some(crate::hooks::trust::HookEvent::PostToolUse)
+            || !hook.matches_tool(&call.name)
+        {
+            continue;
+        }
+        if hook.is_denied() || !crate::hooks::is_enabled(&hook) || !crate::hooks::is_trusted(&hook)
+        {
+            continue;
+        }
+        let run = crate::hooks::run_hook(&hook, &payload, &deps.cancel).await;
+        let (decision, reason) = match run {
+            crate::hooks::HookRun::Allow { warning } => ("allow", warning),
+            crate::hooks::HookRun::Deny { reason } => {
+                tracing::warn!(
+                    "PostToolUse hook `{}` reported deny ({reason}); ignored",
+                    hook.display()
+                );
+                ("observe", Some(reason))
+            }
+        };
+        crate::hooks::record_last(&hook.fingerprint(), decision, reason);
     }
 }
 
@@ -1014,6 +1180,7 @@ async fn dispatch_subagent(
     deps: &TurnDeps,
     tool: &dyn crate::tools::Tool,
     summary: &str,
+    hook_notes: &[String],
 ) -> ChatMessage {
     let slice = deps.subagents.as_ref().map(|h| h.slice()).unwrap_or(0.0);
     let isolation = crate::session::worktree::Isolation::parse(
@@ -1036,11 +1203,13 @@ async fn dispatch_subagent(
     ctx.allow_execute = true;
     let outcome = match tool.execute(call.arguments.clone(), &ctx).await {
         Ok(out) => out,
-        Err(e) => return finish_tool(deps, call, e.to_string(), true),
+        Err(e) => {
+            return finish_executed(deps, call, e.to_string(), true, hook_notes).await;
+        }
     };
     let merge = patches.lock().ok().map(|p| p.clone()).unwrap_or_default();
     if merge.is_empty() {
-        return finish_tool(deps, call, outcome.content, false);
+        return finish_executed(deps, call, outcome.content, false, hook_notes).await;
     }
     let source = call
         .arguments
@@ -1085,12 +1254,14 @@ async fn dispatch_subagent(
                     }
                     Ok(()) => persist_patch(deps, &patch),
                     Err(e) => {
-                        return finish_tool(
+                        return finish_executed(
                             deps,
                             call,
                             format!("{}\n\nmerge failed: {e}", outcome.content),
                             true,
-                        );
+                            hook_notes,
+                        )
+                        .await;
                     }
                 }
             }
@@ -1099,14 +1270,21 @@ async fn dispatch_subagent(
             } else {
                 format!("\n\nMerged {applied} file(s) from the worktree.")
             };
-            finish_tool(deps, call, format!("{}{status}", outcome.content), false)
+            finish_executed(
+                deps,
+                call,
+                format!("{}{status}", outcome.content),
+                false,
+                hook_notes,
+            )
+            .await
         }
         ApprovalDecision::Denied => {
             for mut patch in merge {
                 patch.status = crate::workspace::PatchStatus::Rejected;
                 persist_patch(deps, &patch);
             }
-            finish_tool(
+            finish_executed(
                 deps,
                 call,
                 format!(
@@ -1114,7 +1292,9 @@ async fn dispatch_subagent(
                     outcome.content
                 ),
                 true,
+                hook_notes,
             )
+            .await
         }
     }
 }

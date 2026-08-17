@@ -7,6 +7,7 @@ mod app;
 mod coder;
 mod context;
 mod diagnostics;
+mod hooks;
 mod mcp;
 mod media;
 mod pipeline;

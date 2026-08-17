@@ -1,3 +1,4 @@
+pub mod declared;
 pub mod paths;
 pub mod policy;
 pub mod redact;

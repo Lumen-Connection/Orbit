@@ -34,6 +34,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     tab_button(ui, app, SettingsTab::Appearance, "Appearance");
                     tab_button(ui, app, SettingsTab::Shortcuts, "Shortcuts");
                     tab_button(ui, app, SettingsTab::Mcp, "MCP");
+                    tab_button(ui, app, SettingsTab::Hooks, "Hooks");
                     tab_button(ui, app, SettingsTab::About, "About");
                 });
                 ui.separator();
@@ -46,6 +47,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     SettingsTab::Appearance => render_appearance(app, ui),
                     SettingsTab::Shortcuts => render_shortcuts(ui),
                     SettingsTab::Mcp => render_mcp(app, ui),
+                    SettingsTab::Hooks => render_hooks(app, ui),
                     SettingsTab::About => render_about(app, ui),
                 });
             });
@@ -612,6 +614,89 @@ fn render_mcp(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some((qualified, risk)) = toggle_risk {
         let _ = crate::mcp::trust::set_risk_override(&qualified, risk);
+    }
+}
+
+fn render_hooks(app: &mut App, ui: &mut egui::Ui) {
+    ui.heading("Project hooks");
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(
+            "Declared in .orbit/config.toml. Hooks are policy convenience, not a security \
+             boundary: a broken hook fails open. First run on this machine needs explicit trust.",
+        )
+        .small()
+        .color(crate::ui::theme::tokens(ui).text_muted),
+    );
+    ui.add_space(8.0);
+    let Screen::Main(state) = &app.screen else {
+        return;
+    };
+    let Some(project) = state.coder.project.clone() else {
+        ui.label("Open a project to load hooks.");
+        return;
+    };
+    let hooks = crate::hooks::load_hooks(&project.canonical_root);
+    if hooks.is_empty() {
+        ui.label("No [[hooks]] entries in .orbit/config.toml.");
+        return;
+    }
+    let mut trust = None;
+    let mut toggle: Option<(crate::hooks::trust::HookConfig, bool)> = None;
+    for hook in &hooks {
+        let fp = hook.fingerprint();
+        let denied = hook.is_denied();
+        let trusted = crate::hooks::is_trusted(hook);
+        let enabled = crate::hooks::is_enabled(hook);
+        let last = crate::hooks::last_result(&fp);
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong(hook.event.as_str());
+                ui.label(format!("matcher /{}/", hook.matcher));
+            });
+            ui.monospace(hook.display());
+            let status = if denied {
+                "denied (denylist)"
+            } else if !trusted {
+                "needs trust"
+            } else if !enabled {
+                "disabled"
+            } else {
+                "trusted"
+            };
+            ui.label(status);
+            if let Some(last) = last {
+                let text = match last.reason {
+                    Some(reason) => format!("last: {} — {reason}", last.decision),
+                    None => format!("last: {}", last.decision),
+                };
+                ui.label(
+                    egui::RichText::new(text)
+                        .small()
+                        .color(crate::ui::theme::tokens(ui).text_muted),
+                );
+            }
+            ui.horizontal(|ui| {
+                if denied {
+                    ui.label("Cannot be trusted.");
+                } else if !trusted && ui.button("Trust on this machine").clicked() {
+                    trust = Some(hook.clone());
+                }
+                if !denied && trusted {
+                    let label = if enabled { "Disable" } else { "Enable" };
+                    if ui.button(label).clicked() {
+                        toggle = Some((hook.clone(), !enabled));
+                    }
+                }
+            });
+        });
+        ui.add_space(6.0);
+    }
+    if let Some(hook) = trust {
+        let _ = crate::hooks::trust_on_this_machine(&hook);
+    }
+    if let Some((hook, enabled)) = toggle {
+        let _ = crate::hooks::set_enabled(&hook, enabled);
     }
 }
 

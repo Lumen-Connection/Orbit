@@ -1075,3 +1075,379 @@ async fn worktree_isolation_refuses_a_project_without_git() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+fn hook_stub() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.parent()?;
+    let path = dir.join(format!("orbit-hook-stub{}", std::env::consts::EXE_SUFFIX));
+    path.exists()
+        .then(|| path.to_string_lossy().replace('\\', "/"))
+}
+
+fn install_hook(root: &std::path::Path, event: &str, matcher: &str, args: &[&str]) -> bool {
+    let Some(stub) = hook_stub() else {
+        return false;
+    };
+    let dir = root.join(".orbit");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut body = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
+    let args_toml = args
+        .iter()
+        .map(|a| format!("\"{}\"", a.replace('\\', "/")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    body.push_str(&format!(
+        "\n[[hooks]]\nevent = \"{event}\"\nmatcher = \"{matcher}\"\ncommand = \"{stub}\"\nargs = [{args_toml}]\n"
+    ));
+    std::fs::write(dir.join("config.toml"), body).unwrap();
+    true
+}
+
+fn trust_installed(root: &std::path::Path) {
+    for hook in crate::hooks::load_hooks(root) {
+        let _ = crate::hooks::trust_on_this_machine(&hook);
+    }
+}
+
+fn forget_installed(root: &std::path::Path) {
+    for hook in crate::hooks::load_hooks(root) {
+        let _ = crate::security::declared::MachineTrust::HOOKS.forget(&hook.fingerprint());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_hook_deny_blocks_write_and_reason_reaches_the_model() {
+    let (_tmp, project, _) = fixture();
+    if !install_hook(
+        &project.canonical_root,
+        "PreToolUse",
+        "write_file",
+        &["deny", "no migrations"],
+    ) {
+        return;
+    }
+    trust_installed(&project.canonical_root);
+    let (tx, _rx) = mpsc::channel();
+    let call = ToolCall {
+        id: "w".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"migrations/1.sql","content":"x"}),
+    };
+    let msg = dispatch_tool(
+        &call,
+        &deps(
+            Arc::new(Script {
+                turn: AtomicUsize::new(99),
+            }),
+            project.clone(),
+            None,
+            CancellationToken::new(),
+            Policy {
+                auto_approve_mutating: true,
+                ..Policy::default()
+            },
+            tx,
+            ApprovalBridge::new(),
+            None,
+            (None, None),
+            BudgetBridge::new(),
+        ),
+    )
+    .await;
+    forget_installed(&project.canonical_root);
+    match msg {
+        ChatMessage::ToolResult {
+            content, is_error, ..
+        } => {
+            assert!(is_error);
+            assert!(
+                content.contains("migrations") || content.contains("Blocked by project hook"),
+                "{content}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_exit_one_denies_the_tool() {
+    let (_tmp, project, _) = fixture();
+    if !install_hook(
+        &project.canonical_root,
+        "PreToolUse",
+        "write_file",
+        &["exit1"],
+    ) {
+        return;
+    }
+    trust_installed(&project.canonical_root);
+    let (tx, _rx) = mpsc::channel();
+    let call = ToolCall {
+        id: "w".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"src/lib.rs","content":"x"}),
+    };
+    let msg = dispatch_tool(
+        &call,
+        &deps(
+            Arc::new(Script {
+                turn: AtomicUsize::new(99),
+            }),
+            project.clone(),
+            None,
+            CancellationToken::new(),
+            Policy {
+                auto_approve_mutating: true,
+                ..Policy::default()
+            },
+            tx,
+            ApprovalBridge::new(),
+            None,
+            (None, None),
+            BudgetBridge::new(),
+        ),
+    )
+    .await;
+    forget_installed(&project.canonical_root);
+    match msg {
+        ChatMessage::ToolResult {
+            content, is_error, ..
+        } => {
+            assert!(is_error, "{content}");
+            assert!(
+                content.contains("hook") || content.contains("crashed"),
+                "{content}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hanging_hook_is_killed_and_the_tool_proceeds() {
+    let (_tmp, project, _) = fixture();
+    if !install_hook(
+        &project.canonical_root,
+        "PreToolUse",
+        "write_file",
+        &["hang"],
+    ) {
+        return;
+    }
+    trust_installed(&project.canonical_root);
+    let (tx, _rx) = mpsc::channel();
+    let call = ToolCall {
+        id: "w".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"src/lib.rs","content":"fn hung() {}"}),
+    };
+    let started = std::time::Instant::now();
+    let msg = dispatch_tool(
+        &call,
+        &deps(
+            Arc::new(Script {
+                turn: AtomicUsize::new(99),
+            }),
+            project.clone(),
+            None,
+            CancellationToken::new(),
+            Policy {
+                auto_approve_mutating: true,
+                ..Policy::default()
+            },
+            tx,
+            ApprovalBridge::new(),
+            None,
+            (None, None),
+            BudgetBridge::new(),
+        ),
+    )
+    .await;
+    forget_installed(&project.canonical_root);
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    match msg {
+        ChatMessage::ToolResult {
+            content, is_error, ..
+        } => {
+            assert!(!is_error, "{content}");
+            assert!(content.contains("timed out"), "{content}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let text = std::fs::read_to_string(project.canonical_root.join("src/lib.rs")).unwrap();
+    assert!(text.contains("fn hung()"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn untrusted_hook_asks_for_approval() {
+    let (_tmp, project, _) = fixture();
+    if !install_hook(
+        &project.canonical_root,
+        "PreToolUse",
+        "write_file",
+        &["allow"],
+    ) {
+        return;
+    }
+    forget_installed(&project.canonical_root);
+    let (tx, rx) = mpsc::channel();
+    let approvals = ApprovalBridge::new();
+    let call = ToolCall {
+        id: "w".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"src/lib.rs","content":"fn x() {}"}),
+    };
+    let turn = deps(
+        Arc::new(Script {
+            turn: AtomicUsize::new(99),
+        }),
+        project.clone(),
+        None,
+        CancellationToken::new(),
+        Policy {
+            auto_approve_mutating: true,
+            ..Policy::default()
+        },
+        tx,
+        approvals.clone(),
+        None,
+        (None, None),
+        BudgetBridge::new(),
+    );
+    let task = tokio::spawn(async move { dispatch_tool(&call, &turn).await });
+    let handle = loop {
+        match rx.recv() {
+            Ok(AgentEvent::ApprovalRequired(h)) => break h,
+            Ok(_) => continue,
+            Err(_) => panic!("closed"),
+        }
+    };
+    assert!(
+        handle.tool_name == "hook" || handle.summary.contains("Trust project hook"),
+        "{handle:?}"
+    );
+    approvals.resolve(handle.id, ApprovalDecision::Denied);
+    let msg = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("timeout")
+        .unwrap();
+    forget_installed(&project.canonical_root);
+    match msg {
+        ChatMessage::ToolResult { content, .. } => {
+            assert!(
+                content.contains("not trusted") || content.contains("Applied"),
+                "{content}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn role_guard_runs_before_the_hook() {
+    let (_tmp, project, _) = fixture();
+    let marker = project.canonical_root.join("hook-ran.txt");
+    let marker_arg = marker.display().to_string().replace('\\', "/");
+    if !install_hook(
+        &project.canonical_root,
+        "PreToolUse",
+        "write_file",
+        &["touch", &marker_arg],
+    ) {
+        return;
+    }
+    trust_installed(&project.canonical_root);
+    let (tx, _rx) = mpsc::channel();
+    let mut turn = deps(
+        Arc::new(Script {
+            turn: AtomicUsize::new(99),
+        }),
+        project.clone(),
+        None,
+        CancellationToken::new(),
+        Policy::default(),
+        tx,
+        ApprovalBridge::new(),
+        None,
+        (None, None),
+        BudgetBridge::new(),
+    );
+    turn.session_role = crate::session::AgentRole::Architect;
+    let call = ToolCall {
+        id: "w".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"src/lib.rs","content":"x"}),
+    };
+    let msg = dispatch_tool(&call, &turn).await;
+    forget_installed(&project.canonical_root);
+    match msg {
+        ChatMessage::ToolResult {
+            content, is_error, ..
+        } => {
+            assert!(is_error);
+            assert!(
+                content.contains("Architect") || content.contains("not allowed"),
+                "{content}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        !marker.exists(),
+        "hook must not run after a role-guard deny"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn denylist_hook_is_refused_without_an_approval() {
+    let (_tmp, project, _) = fixture();
+    let dir = project.canonical_root.join(".orbit");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut body = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
+    body.push_str(
+        "\n[[hooks]]\nevent = \"PreToolUse\"\nmatcher = \"write_file\"\ncommand = \"shutdown\"\nargs = [\"-h\", \"now\"]\n",
+    );
+    std::fs::write(dir.join("config.toml"), body).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let call = ToolCall {
+        id: "w".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path":"src/lib.rs","content":"fn d() {}"}),
+    };
+    let msg = dispatch_tool(
+        &call,
+        &deps(
+            Arc::new(Script {
+                turn: AtomicUsize::new(99),
+            }),
+            project.clone(),
+            None,
+            CancellationToken::new(),
+            Policy {
+                auto_approve_mutating: true,
+                ..Policy::default()
+            },
+            tx,
+            ApprovalBridge::new(),
+            None,
+            (None, None),
+            BudgetBridge::new(),
+        ),
+    )
+    .await;
+    assert!(
+        rx.try_recv()
+            .ok()
+            .is_none_or(|e| !matches!(e, AgentEvent::ApprovalRequired(_))),
+        "denylist hook must not offer approval"
+    );
+    match msg {
+        ChatMessage::ToolResult { content, .. } => {
+            assert!(
+                content.contains("denylist") || content.contains("Applied"),
+                "{content}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
