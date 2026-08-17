@@ -220,6 +220,7 @@ pub struct CoderState {
     pub expand_decisions: bool,
     pub expand_tasks: bool,
     pub expand_findings: bool,
+    pub expand_skills: bool,
     pub restore_rx: Option<Receiver<ProjectSnapshot>>,
     pub show_usage: bool,
     pub usage_report: Option<UsageReport>,
@@ -236,6 +237,7 @@ pub struct CoderState {
     pub pipeline_rx: Option<Receiver<crate::pipeline::PipelineEvent>>,
     pub pipeline: Option<crate::pipeline::Pipeline>,
     pub pipeline_dialog: Option<crate::pipeline::PipelineConfig>,
+    pub mcp: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -293,6 +295,7 @@ impl Default for CoderState {
             expand_decisions: true,
             expand_tasks: true,
             expand_findings: false,
+            expand_skills: true,
             restore_rx: None,
             show_usage: false,
             usage_report: None,
@@ -311,6 +314,7 @@ impl Default for CoderState {
             pipeline_rx: Some(pipeline_rx),
             pipeline: None,
             pipeline_dialog: None,
+            mcp: std::sync::Arc::new(std::sync::Mutex::new(crate::mcp::McpManager::default())),
         }
     }
 }
@@ -465,6 +469,7 @@ impl App {
             runner.kill_all();
         }
         state.coder.run_restart_prompt = None;
+        shutdown_mcp(&self.rt, &state.coder.mcp);
     }
 
     fn open_project_now(&mut self, path: PathBuf) {
@@ -640,6 +645,32 @@ impl App {
         };
         if let Ok(mut runner) = state.coder.runner.lock() {
             runner.kill_all();
+        }
+        shutdown_mcp(&self.rt, &state.coder.mcp);
+    }
+
+    pub fn trust_mcp_server(&mut self, name: &str) {
+        let crate::app::Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        let mcp = state.coder.mcp.clone();
+        let name = name.to_string();
+        let result = self.rt.block_on(async move {
+            let mut mgr = mcp
+                .lock()
+                .ok()
+                .map(|mut g| std::mem::take(&mut *g))
+                .ok_or_else(|| "MCP lock poisoned".to_string())?;
+            let out = mgr.trust_and_start(&name).await;
+            if let Ok(mut slot) = mcp.lock() {
+                *slot = mgr;
+            }
+            out
+        });
+        if let Err(e) = result
+            && let crate::app::Screen::Main(state) = &mut self.screen
+        {
+            state.coder.status = Some(e);
         }
     }
 
@@ -901,6 +932,23 @@ impl App {
             return;
         };
         let slots = state.coder.sessions.slots.clone();
+        let pending_subagents = state.coder.sessions.pending_subagents.clone();
+        let subagent_fraction = state
+            .coder
+            .store
+            .as_ref()
+            .and_then(|s| s.lock().ok())
+            .map(|store| store.settings.subagent_budget_fraction)
+            .unwrap_or(0.25);
+        let session_model = state
+            .coder
+            .sessions
+            .active()
+            .map(|s| s.model.clone())
+            .unwrap_or_default();
+        let Some(provider) = crate::app::resolve_provider(state, &session_model) else {
+            return;
+        };
         let Some(live) = state.coder.sessions.active_mut() else {
             return;
         };
@@ -922,7 +970,6 @@ impl App {
         let session = live.handle.clone();
         let session_id = live.id.clone();
         let session_label = live.label.clone();
-        let session_model = live.model.clone();
         let approvals = live.approvals.clone();
         let budget_bridge = live.budget_bridge.clone();
         let budget_usd = live.budget_usd;
@@ -933,14 +980,11 @@ impl App {
             .find(&session_model)
             .map(|m| (m.prompt_price, m.completion_price))
             .unwrap_or((None, None));
-        let Some(provider) = state.provider.clone() else {
-            live.busy = false;
-            return;
-        };
         let session_role = live.role;
+        let host_provider = provider.clone();
         let deps = TurnDeps {
             provider,
-            registry: Arc::new(ToolRegistry::for_role(session_role)),
+            registry: Arc::new(registry_for_session(session_role, &state.coder.mcp)),
             project,
             events: tx,
             approvals,
@@ -984,6 +1028,14 @@ impl App {
                 ),
             },
             user_images: Vec::new(),
+            subagents: Some(subagent_host_from(
+                host_provider,
+                slots.clone(),
+                spent_start,
+                budget_usd,
+                pending_subagents,
+                subagent_fraction,
+            )),
         };
         self.rt.spawn(async move {
             let cancel = deps.cancel.clone();
@@ -1205,12 +1257,33 @@ impl App {
             return;
         };
         let slots = state.coder.sessions.slots.clone();
+        let pending_subagents = state.coder.sessions.pending_subagents.clone();
+        let subagent_fraction = state
+            .coder
+            .store
+            .as_ref()
+            .and_then(|s| s.lock().ok())
+            .map(|store| store.settings.subagent_budget_fraction)
+            .unwrap_or(0.25);
+        let session_model = state
+            .coder
+            .sessions
+            .active()
+            .map(|s| s.model.clone())
+            .unwrap_or_default();
+        let provider = crate::app::resolve_provider(state, &session_model);
         let Some(live) = state.coder.sessions.active_mut() else {
             return;
         };
         if live.busy && user_input.is_some() {
             return;
         }
+        let Some(provider) = provider else {
+            live.transcript.push(TranscriptItem::Assistant(
+                "⚠ Configure an API key in Settings before sending.".into(),
+            ));
+            return;
+        };
         live.busy = true;
         live.handoff_dismissed = true;
         state.coder.status = None;
@@ -1222,7 +1295,6 @@ impl App {
         let session = live.handle.clone();
         let session_id = live.id.clone();
         let session_label = live.label.clone();
-        let session_model = live.model.clone();
         let approvals = live.approvals.clone();
         let budget_bridge = live.budget_bridge.clone();
         let budget_usd = live.budget_usd;
@@ -1232,18 +1304,12 @@ impl App {
             .find(&session_model)
             .map(|m| (m.prompt_price, m.completion_price))
             .unwrap_or((None, None));
-
-        let Some(provider) = state.provider.clone() else {
-            live.busy = false;
-            live.transcript.push(TranscriptItem::Assistant(
-                "⚠ Configure an API key in Settings before sending.".into(),
-            ));
-            return;
-        };
         let session_role = live.role;
+        let host_provider = provider.clone();
+        let spent_now = live.spent_usd;
         let deps = TurnDeps {
             provider,
-            registry: Arc::new(ToolRegistry::for_role(session_role)),
+            registry: Arc::new(registry_for_session(session_role, &state.coder.mcp)),
             project,
             events: tx,
             approvals,
@@ -1266,7 +1332,7 @@ impl App {
             completion_price: prices.1,
             budget_usd: Some(budget_usd),
             budget_bridge,
-            spent_start: live.spent_usd,
+            spent_start: spent_now,
             context_length: state
                 .catalog
                 .find(&session_model)
@@ -1287,6 +1353,14 @@ impl App {
                 ),
             },
             user_images: std::mem::take(&mut state.draft_images),
+            subagents: Some(subagent_host_from(
+                host_provider,
+                slots.clone(),
+                spent_now,
+                budget_usd,
+                pending_subagents,
+                subagent_fraction,
+            )),
         };
         self.rt.spawn(async move {
             let cancel = deps.cancel.clone();
@@ -1369,6 +1443,10 @@ impl App {
             .active()
             .map(|s| s.model.clone())
             .unwrap_or_else(|| state.settings.coder_default_model.clone());
+        if let Err(msg) = coder_model_allows_tools(state, &model) {
+            state.coder.status = Some(msg);
+            return;
+        }
         let label = state.coder.sessions.next_label(&project.name);
         let id = state.coder.sessions.create(label.clone(), model.clone());
         apply_session_limits(state, &id);
@@ -1871,6 +1949,10 @@ impl App {
         let crate::app::Screen::Main(state) = &mut self.screen else {
             return;
         };
+        if let Err(msg) = coder_model_allows_tools(state, &model) {
+            state.coder.status = Some(msg);
+            return;
+        }
         let Some(live) = state.coder.sessions.active_mut() else {
             return;
         };
@@ -1936,6 +2018,13 @@ fn start_scan(
     state.coder.run_configs = crate::workspace::run_config::load_saved(&project_row.canonical_root);
     state.coder.suggested_runs =
         crate::workspace::run_config::suggestions_not_saved(&project_row.canonical_root);
+    {
+        let mut mgr = crate::mcp::McpManager::load(&project_row.canonical_root);
+        rt.block_on(mgr.start_trusted());
+        if let Ok(mut slot) = state.coder.mcp.lock() {
+            *slot = mgr;
+        }
+    }
     state.coder.tree = FileTree::default();
     state.coder.scan_rx = Some(rx);
     state.coder.scan_cancel = Some(cancel);
@@ -2260,6 +2349,64 @@ pub(crate) fn transcript_from_messages(
         });
     }
     items
+}
+
+fn coder_model_allows_tools(state: &crate::app::MainState, model: &str) -> Result<(), String> {
+    if let Some(info) = state.catalog.find(model)
+        && !info.supports_tools
+    {
+        return Err(format!(
+            "Model `{model}` does not support tool calling. Pick another model for Coder sessions."
+        ));
+    }
+    Ok(())
+}
+
+fn shutdown_mcp(
+    rt: &std::sync::Arc<tokio::runtime::Runtime>,
+    mcp: &std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
+) {
+    let mcp = mcp.clone();
+    rt.block_on(async move {
+        let mut mgr = mcp
+            .lock()
+            .ok()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default();
+        mgr.shutdown().await;
+        if let Ok(mut slot) = mcp.lock() {
+            *slot = mgr;
+        }
+    });
+}
+
+fn registry_for_session(
+    role: crate::session::AgentRole,
+    mcp: &std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
+) -> ToolRegistry {
+    let mut registry = ToolRegistry::for_role(role);
+    if let Ok(mgr) = mcp.lock() {
+        mgr.attach(&mut registry, role);
+    }
+    registry
+}
+
+fn subagent_host_from(
+    provider: Arc<dyn crate::providers::AiProvider>,
+    slots: Arc<tokio::sync::Semaphore>,
+    spent_start: f64,
+    budget_usd: f64,
+    pending: Arc<std::sync::Mutex<Vec<crate::session::subagent::PendingSubagent>>>,
+    fraction: f64,
+) -> Arc<crate::session::subagent::SubagentHost> {
+    Arc::new(crate::session::subagent::SubagentHost {
+        provider,
+        slots,
+        shared_spent: Arc::new(std::sync::Mutex::new(spent_start)),
+        budget_usd: Some(budget_usd),
+        pending,
+        fraction,
+    })
 }
 
 fn ingest_entries(tree: &mut FileTree, entries: &[ScanEntry]) {

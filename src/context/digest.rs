@@ -141,6 +141,8 @@ pub fn build_digest(store: &OrbitStore, session: &SessionId, project_name: &str)
         }
     }
 
+    append_skills_section(&mut body, store);
+
     body.push('\n');
     body.push_str(&foreign_section);
     body.push_str("=== END OF CONTEXT ===\n");
@@ -206,6 +208,27 @@ pub fn build_handoff(store: &OrbitStore, session: &SessionId) -> HandoffSummary 
         files,
         banner,
         digest_section: format_foreign_section(&changes),
+    }
+}
+
+fn append_skills_section(body: &mut String, store: &OrbitStore) {
+    let total = store.skills.len();
+    let cap = store.settings.max_skills.max(1);
+    let shown = total.min(cap);
+    if total > shown {
+        body.push_str(&format!("\nAvailable skills ({total}, showing {shown}):\n"));
+    } else {
+        body.push_str(&format!("\nAvailable skills ({total}):\n"));
+    }
+    if total == 0 {
+        body.push_str("- (none)\n");
+        return;
+    }
+    for skill in store.skills.iter().take(shown) {
+        body.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+    }
+    if total > shown {
+        body.push_str(&format!("- ({} more skills not listed)\n", total - shown));
     }
 }
 
@@ -484,5 +507,77 @@ mod tests {
         assert!(digest.text.contains("Reuse the FTS table."));
         assert!(digest.text.contains("index chats"));
         assert!(digest.text.contains("[AC1] Ctrl+K focuses search"));
+    }
+
+    fn push_skill(store: &mut OrbitStore, slug: &str, description: &str, body: &str) {
+        store.skills.push(crate::context::Skill {
+            slug: slug.into(),
+            name: slug.into(),
+            description: description.into(),
+            body: body.into(),
+            path: store.dir.join("skills").join(slug).join("SKILL.md"),
+        });
+    }
+
+    #[test]
+    fn digest_lists_skill_names_not_bodies() {
+        let (_tmp, mut store) = root();
+        push_skill(
+            &mut store,
+            "run-tests",
+            "How to run the suite.",
+            "SECRET BODY cargo test --all-targets",
+        );
+        let digest = build_digest(&store, &SessionId::new("bbb"), "Orbit");
+        assert!(digest.text.contains("Available skills (1):"));
+        assert!(digest.text.contains("- run-tests: How to run the suite."));
+        assert!(!digest.text.contains("SECRET BODY"));
+    }
+
+    #[test]
+    fn twenty_skills_add_about_one_line_each() {
+        let (_tmp, mut store) = root();
+        let before = build_digest(&store, &SessionId::new("bbb"), "Orbit");
+        let before_lines = before.text.lines().count();
+        for i in 0..20 {
+            push_skill(
+                &mut store,
+                &format!("skill-{i:02}"),
+                &format!("Description of skill {i}."),
+                &format!("BODY of skill {i} that must not appear in the digest."),
+            );
+        }
+        let after = build_digest(&store, &SessionId::new("bbb"), "Orbit");
+        let added = after.text.lines().count().saturating_sub(before_lines);
+        let skill_lines = after
+            .text
+            .lines()
+            .filter(|l| l.starts_with("- skill-"))
+            .count();
+        assert_eq!(skill_lines, 20);
+        assert!(
+            (18..=22).contains(&added),
+            "expected ~1 line per skill, grew by {added} lines"
+        );
+        assert!(after.text.contains("Available skills (20):"));
+        assert!(!after.text.contains("BODY of skill"));
+    }
+
+    #[test]
+    fn digest_caps_listed_skills() {
+        let (_tmp, mut store) = root();
+        store.settings.max_skills = 3;
+        for i in 0..5 {
+            push_skill(
+                &mut store,
+                &format!("skill-{i}"),
+                "desc",
+                "body that stays out",
+            );
+        }
+        let digest = build_digest(&store, &SessionId::new("bbb"), "Orbit");
+        assert!(digest.text.contains("Available skills (5, showing 3):"));
+        assert!(digest.text.contains("2 more skills not listed"));
+        assert!(!digest.text.contains("body that stays out"));
     }
 }

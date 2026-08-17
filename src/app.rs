@@ -1,8 +1,8 @@
 use crate::coder::{AppMode, CoderState};
 use crate::providers::catalog::ModelCatalog;
 use crate::providers::{
-    AiProvider, ChatMessage, ChatRequest, ProviderError, ProviderEvent, connect_openrouter_timed,
-    validate_openrouter_key,
+    ANTHROPIC, AiProvider, ChatMessage, ChatRequest, OPENAI_COMPAT, OPENROUTER, ProviderError,
+    ProviderEvent, ProviderHub, connect_openrouter_timed, validate_openrouter_key,
 };
 use crate::secure_store::SecureStore;
 use crate::storage::{self, AppSettings, Db};
@@ -76,6 +76,88 @@ pub fn credential_state(status: &CredentialStatus) -> CredentialState {
     status.state
 }
 
+pub fn resolve_provider(state: &MainState, model: &str) -> Option<Arc<dyn AiProvider>> {
+    state
+        .providers
+        .resolve(model, &state.catalog)
+        .or_else(|| state.provider.clone())
+}
+
+pub fn build_provider_hub(timeout: std::time::Duration, openai_compat_base: &str) -> ProviderHub {
+    let mut hub = ProviderHub::default();
+    if let Ok(Some(key)) = SecureStore::load_key_for(OPENROUTER)
+        && let Ok(provider) = connect_openrouter_timed(key, timeout)
+    {
+        hub.insert(provider);
+    }
+    if let Ok(Some(key)) = SecureStore::load_key_for(ANTHROPIC)
+        && let Ok(client) = crate::providers::anthropic::AnthropicClient::new(key, timeout)
+    {
+        hub.insert(Arc::new(client));
+    }
+    let base = openai_compat_base.trim();
+    if !base.is_empty() {
+        let key = SecureStore::load_key_for(OPENAI_COMPAT).ok().flatten();
+        if let Ok(client) =
+            crate::providers::openai_compat::OpenAiCompatClient::new(key, base.to_string(), timeout)
+        {
+            hub.insert(Arc::new(client));
+        }
+    }
+    hub
+}
+
+pub async fn refresh_catalog(hub: ProviderHub) -> ModelCatalog {
+    let mut models = Vec::new();
+    for id in [OPENROUTER, ANTHROPIC, OPENAI_COMPAT] {
+        let Some(provider) = hub.get(id) else {
+            continue;
+        };
+        match provider.list_models().await {
+            Ok(list) => models.extend(list.into_iter().map(Into::into)),
+            Err(e) => tracing::warn!("couldn't list models for {id}: {e}"),
+        }
+    }
+    if models.is_empty() {
+        return ModelCatalog::curated();
+    }
+    ModelCatalog::from_remote(models, Utc::now())
+}
+
+async fn validate_provider_key(
+    provider: &str,
+    key: String,
+    timeout: std::time::Duration,
+    openai_base: &str,
+) -> Result<(), ProviderError> {
+    match provider {
+        id if id == ANTHROPIC => {
+            let client = crate::providers::anthropic::AnthropicClient::new(key, timeout)
+                .map_err(|e| ProviderError::Message(e.to_string()))?;
+            client.validate_key().await
+        }
+        id if id == OPENAI_COMPAT => {
+            let base = if openai_base.trim().is_empty() {
+                crate::providers::openai_compat::DEFAULT_LOCAL_BASE_URL.to_string()
+            } else {
+                openai_base.to_string()
+            };
+            let client = crate::providers::openai_compat::OpenAiCompatClient::new(
+                if key.trim().is_empty() {
+                    None
+                } else {
+                    Some(key)
+                },
+                base,
+                timeout,
+            )
+            .map_err(|e| ProviderError::Message(e.to_string()))?;
+            client.list_models().await.map(|_| ())
+        }
+        _ => validate_openrouter_key(key).await,
+    }
+}
+
 pub fn can_create_session(state: CredentialState) -> Result<(), CredentialState> {
     match state {
         CredentialState::Present => Ok(()),
@@ -118,6 +200,9 @@ pub enum SettingsTab {
     Limits,
     Appearance,
     Shortcuts,
+    Mcp,
+    Anthropic,
+    Local,
     About,
 }
 
@@ -139,6 +224,8 @@ pub struct SettingsUi {
     pub test_status: KeyTestStatus,
     pub test_rx: Option<Receiver<ValidationResult>>,
     pub confirm_remove: bool,
+    #[allow(dead_code)]
+    pub test_provider: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +315,7 @@ pub struct PendingResponse {
 }
 
 pub struct MainState {
+    pub providers: ProviderHub,
     pub provider: Option<Arc<dyn AiProvider>>,
     pub chats: Vec<Chat>,
     pub active_chat_id: Option<Uuid>,
@@ -343,7 +431,10 @@ impl App {
     fn build_main_state(api_key: String, rt: &Runtime) -> anyhow::Result<MainState> {
         let settings = storage::load_settings();
         let timeout = std::time::Duration::from_secs(settings.request_timeout_secs);
-        let provider = connect_openrouter_timed(api_key.clone(), timeout)?;
+        let providers = build_provider_hub(timeout, &settings.openai_compat_base_url);
+        let provider = providers
+            .get(OPENROUTER)
+            .or_else(|| connect_openrouter_timed(api_key.clone(), timeout).ok());
         let chats = storage::load_chats().unwrap_or_else(|e| {
             tracing::warn!("couldn't load chats.json: {e:#}");
             Vec::new()
@@ -354,25 +445,20 @@ impl App {
             None
         } else {
             let (tx, rx) = mpsc::channel();
-            let fetch_provider = provider.clone();
+            let hub = providers.clone();
             rt.spawn(async move {
-                match fetch_provider.list_models().await {
-                    Ok(models) => {
-                        let models = models.into_iter().map(Into::into).collect();
-                        let catalog = ModelCatalog::from_remote(models, Utc::now());
-                        if let Err(e) = catalog.save_cache() {
-                            tracing::warn!("couldn't save model catalog cache: {e:#}");
-                        }
-                        let _ = tx.send(catalog);
-                    }
-                    Err(e) => tracing::warn!("couldn't refresh model catalog: {e:#}"),
+                let catalog = refresh_catalog(hub).await;
+                if let Err(e) = catalog.save_cache() {
+                    tracing::warn!("couldn't save model catalog cache: {e:#}");
                 }
+                let _ = tx.send(catalog);
             });
             Some(rx)
         };
 
         Ok(MainState {
-            provider: Some(provider),
+            providers,
+            provider,
             chats,
             active_chat_id,
             temp_chat: None,
@@ -852,7 +938,7 @@ impl App {
             cancel: cancel.clone(),
         });
 
-        let Some(provider) = state.provider.clone() else {
+        let Some(provider) = resolve_provider(state, &model) else {
             return;
         };
         self.rt.spawn(async move {
@@ -993,15 +1079,26 @@ impl App {
             typed
         };
 
+        self.start_provider_key_test(OPENROUTER, key);
+    }
+
+    pub fn start_provider_key_test(&mut self, provider: &'static str, key: String) {
+        let Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        let timeout = std::time::Duration::from_secs(state.settings.request_timeout_secs);
+        let base = state.settings.openai_compat_base_url.clone();
         let (tx, rx) = mpsc::channel();
         state.settings_ui.test_rx = Some(rx);
         state.settings_ui.test_status = KeyTestStatus::Testing;
+        state.settings_ui.test_provider = provider.to_string();
         self.rt.spawn(async move {
-            let result = match validate_openrouter_key(key.clone()).await {
+            let result = match validate_provider_key(provider, key.clone(), timeout, &base).await {
                 Ok(()) => ValidationResult::Ok(key),
-                Err(ProviderError::Unauthorized) => {
-                    ValidationResult::Err("That key was rejected by OpenRouter.".into())
-                }
+                Err(ProviderError::Unauthorized) => ValidationResult::Err(format!(
+                    "That key was rejected by {}.",
+                    crate::providers::catalog::provider_label(provider)
+                )),
                 Err(e) => ValidationResult::Err(format!("{e}")),
             };
             let _ = tx.send(result);
@@ -1025,7 +1122,12 @@ impl App {
         };
         match outcome {
             (ValidationResult::Ok(key), _) => {
-                if let Err(e) = self.apply_api_key(key) {
+                let provider = if let Screen::Main(state) = &self.screen {
+                    state.settings_ui.test_provider.clone()
+                } else {
+                    OPENROUTER.to_string()
+                };
+                if let Err(e) = self.apply_provider_key(&provider, key) {
                     if let Screen::Main(state) = &mut self.screen {
                         state.settings_ui.test_status = KeyTestStatus::Err(format!("{e}"));
                     }
@@ -1056,21 +1158,24 @@ impl App {
         }
     }
 
-    pub fn apply_api_key(&mut self, key: String) -> anyhow::Result<()> {
-        SecureStore::save_key(&key)?;
+    pub fn apply_provider_key(&mut self, provider: &str, key: String) -> anyhow::Result<()> {
+        if !key.trim().is_empty() {
+            SecureStore::save_key_for(provider, &key)?;
+        }
         let timeout = match &self.screen {
             Screen::Main(state) => {
                 std::time::Duration::from_secs(state.settings.request_timeout_secs)
             }
             _ => std::time::Duration::from_secs(storage::DEFAULT_REQUEST_TIMEOUT_SECS),
         };
-        let provider =
-            connect_openrouter_timed(key.clone(), timeout).map_err(|e| anyhow::anyhow!("{e}"))?;
         let Screen::Main(state) = &mut self.screen else {
             return Ok(());
         };
-        state.provider = Some(provider);
-        state.credential = CredentialStatus::from_key(Some(&key));
+        state.providers = build_provider_hub(timeout, &state.settings.openai_compat_base_url);
+        state.provider = state.providers.get(OPENROUTER);
+        if provider == OPENROUTER {
+            state.credential = CredentialStatus::from_key(Some(&key));
+        }
         Ok(())
     }
 
@@ -1081,7 +1186,11 @@ impl App {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        state.provider = None;
+        state.providers = build_provider_hub(
+            std::time::Duration::from_secs(state.settings.request_timeout_secs),
+            &state.settings.openai_compat_base_url,
+        );
+        state.provider = state.providers.get(OPENROUTER);
         state.credential = CredentialStatus::from_key(None);
         state.settings_ui.confirm_remove = false;
         state.settings_ui.test_status = KeyTestStatus::Idle;
@@ -1154,7 +1263,7 @@ impl App {
             interrupted: false,
             images: Vec::new(),
         });
-        let Some(provider) = state.provider.clone() else {
+        let Some(provider) = resolve_provider(state, &model) else {
             return;
         };
         let (tx, rx) = mpsc::channel::<StreamUiEvent>();
@@ -1229,19 +1338,11 @@ impl App {
         let Screen::Main(state) = &self.screen else {
             return;
         };
-        if state.provider.is_none() {
-            return;
-        }
-        let Ok(Some(key)) = SecureStore::load_key() else {
-            return;
-        };
-        match connect_openrouter_timed(key, std::time::Duration::from_secs(timeout_secs)) {
-            Ok(provider) => {
-                if let Screen::Main(state) = &mut self.screen {
-                    state.provider = Some(provider);
-                }
-            }
-            Err(e) => tracing::warn!("couldn't rebuild provider: {e}"),
+        let base = state.settings.openai_compat_base_url.clone();
+        let hub = build_provider_hub(std::time::Duration::from_secs(timeout_secs), &base);
+        if let Screen::Main(state) = &mut self.screen {
+            state.provider = hub.get(OPENROUTER);
+            state.providers = hub;
         }
     }
 

@@ -57,6 +57,7 @@ pub struct HistoryHit {
     pub source: String,
     pub title: String,
     pub snippet: String,
+    pub last_active_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -312,6 +313,50 @@ impl Db {
                     source: row.get(1)?,
                     title: row.get(2)?,
                     snippet: row.get(3)?,
+                    last_active_at: None,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Session-only FTS search restricted to one project. Chat Mode rows
+    /// are excluded so an agent cannot read another repository's history.
+    pub fn search_history_scoped(
+        &self,
+        project_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<HistoryHit>> {
+        let match_query = fts_query(query);
+        if match_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT history_fts.item_id,
+                        history_fts.source,
+                        COALESCE(session.label, history_fts.title),
+                        snippet(history_fts, 3, '[', ']', '…', 12),
+                        session.last_active_at
+                 FROM history_fts
+                 INNER JOIN session ON session.id = history_fts.item_id
+                 WHERE history_fts MATCH ?1
+                   AND history_fts.source = 'session'
+                   AND session.project_id = ?2
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![match_query, project_id, limit as i64], |row| {
+                Ok(HistoryHit {
+                    item_id: row.get(0)?,
+                    source: row.get(1)?,
+                    title: row.get(2)?,
+                    snippet: row.get(3)?,
+                    last_active_at: row.get(4)?,
                 })
             })?;
             let mut out = Vec::new();
@@ -1011,6 +1056,8 @@ mod tests {
         };
         let cost = estimate_cost(Some(0.000001), Some(0.000002), &usage);
         assert!((cost - 0.002).abs() < 1e-12);
+        let free = estimate_cost(Some(0.0), Some(0.0), &usage);
+        assert_eq!(free, 0.0);
     }
 
     #[test]
@@ -1029,5 +1076,56 @@ mod tests {
         assert_eq!(hits[0].source, "session");
         assert_eq!(hits[0].title, "lab");
         assert!(hits[0].snippet.to_lowercase().contains("zebra"));
+    }
+
+    #[test]
+    fn scoped_search_does_not_leak_other_projects_or_chats() {
+        let tmp = TempDir::new().unwrap();
+        let db = Db::open_at(tmp.path().join("orbit.db")).unwrap();
+        let root_a = tmp.path().join("proj-a");
+        let root_b = tmp.path().join("proj-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let project_a = Project::open(&root_a).unwrap();
+        let project_b = Project::open(&root_b).unwrap();
+        db.upsert_project(&project_a).unwrap();
+        db.upsert_project(&project_b).unwrap();
+        let id_a = SessionId::new("sess-a");
+        let id_b = SessionId::new("sess-b");
+        db.upsert_session(&project_a.id, &id_a, "alpha", "m")
+            .unwrap();
+        db.upsert_session(&project_b.id, &id_b, "beta", "m")
+            .unwrap();
+        db.replace_messages(&id_a, &[ChatMessage::user("shared zebra token in A")])
+            .unwrap();
+        db.replace_messages(&id_b, &[ChatMessage::user("shared zebra token in B")])
+            .unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO history_fts (source, item_id, title, body) \
+                 VALUES ('chat', 'chat-1', 'chat mode', 'shared zebra token in chat')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let a = db
+            .search_history_scoped(&project_a.id, "zebra", 10)
+            .unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].item_id, "sess-a");
+        assert_eq!(a[0].title, "alpha");
+        assert_eq!(a[0].source, "session");
+
+        let b = db
+            .search_history_scoped(&project_b.id, "zebra", 10)
+            .unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].item_id, "sess-b");
+
+        let unscoped = db.search_history("zebra", 10).unwrap();
+        assert!(unscoped.iter().any(|h| h.source == "chat"), "{unscoped:?}");
+        assert_eq!(unscoped.len(), 3);
     }
 }

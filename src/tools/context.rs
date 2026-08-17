@@ -514,6 +514,9 @@ mod tests {
             runner: None,
             run_configs: None,
             run_starts: None,
+            db: None,
+            subagents: None,
+            budget_usd: None,
         };
         (tmp, ctx)
     }

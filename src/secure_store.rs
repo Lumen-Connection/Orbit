@@ -3,7 +3,12 @@ use keyring::Entry;
 
 const SERVICE: &str = "orbit";
 const LEGACY_SERVICE: &str = "openchat";
-const USER: &str = "openrouter_api_key";
+const LEGACY_USER: &str = "openrouter_api_key";
+const USER: &str = "api_key";
+
+fn service_for(provider: &str) -> String {
+    format!("orbit:{provider}")
+}
 
 pub struct SecureStore;
 
@@ -50,41 +55,51 @@ impl SecureStore {
         }
     }
 
-    fn entry_for(service: &str) -> Result<Entry> {
-        Entry::new(service, USER).context("Failed to open system credential-store entry")
+    fn entry_for(service: &str, user: &str) -> Result<Entry> {
+        Entry::new(service, user).context("Failed to open system credential-store entry")
     }
 
-    fn read_service(service: &str) -> Result<Option<String>> {
-        match Self::entry_for(service)?.get_password() {
+    fn read_service(service: &str, user: &str) -> Result<Option<String>> {
+        match Self::entry_for(service, user)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(e).context("Failed to read API key from system credential store"),
         }
     }
 
-    fn delete_service(service: &str) -> Result<()> {
-        match Self::entry_for(service)?.delete_credential() {
+    fn delete_service(service: &str, user: &str) -> Result<()> {
+        match Self::entry_for(service, user)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(e).context("Failed to delete API key from system credential store"),
         }
     }
 
+    /// OpenRouter key. Migrates `orbit`/`openrouter_api_key` and the older
+    /// `openchat` service to `orbit:openrouter` on first load.
     pub fn load_key() -> Result<Option<String>> {
-        let current = Self::read_service(SERVICE)?;
-        let legacy = match &current {
-            Some(secret) if !secret.trim().is_empty() => None,
-            _ => Self::read_service(LEGACY_SERVICE)?,
-        };
+        Self::load_key_for(crate::providers::OPENROUTER)
+    }
 
-        match decide_key_load(current, legacy) {
-            KeyLoadDecision::UseCurrent(key) => Ok(Some(key)),
-            KeyLoadDecision::MigrateFromLegacy(key) => {
-                Self::save_key(&key)?;
-                Self::delete_service(LEGACY_SERVICE)?;
-                tracing::info!(
-                    "migrated OpenRouter API key from legacy keyring service '{LEGACY_SERVICE}' to '{SERVICE}'"
-                );
+    pub fn load_key_for(provider: &str) -> Result<Option<String>> {
+        let keyed = Self::read_service(&service_for(provider), USER)?;
+        if let Some(key) = normalize_secret(keyed) {
+            return Ok(Some(key));
+        }
+        if provider != crate::providers::OPENROUTER {
+            return Ok(None);
+        }
+        let unscoped = Self::read_service(SERVICE, LEGACY_USER)?;
+        let openchat = match &unscoped {
+            Some(secret) if !secret.trim().is_empty() => None,
+            _ => Self::read_service(LEGACY_SERVICE, LEGACY_USER)?,
+        };
+        match decide_key_load(unscoped, openchat) {
+            KeyLoadDecision::UseCurrent(key) | KeyLoadDecision::MigrateFromLegacy(key) => {
+                Self::save_key_for(provider, &key)?;
+                let _ = Self::delete_service(SERVICE, LEGACY_USER);
+                let _ = Self::delete_service(LEGACY_SERVICE, LEGACY_USER);
+                tracing::info!("migrated OpenRouter API key to '{}'", service_for(provider));
                 Ok(Some(key))
             }
             KeyLoadDecision::Missing => Ok(None),
@@ -92,19 +107,29 @@ impl SecureStore {
     }
 
     pub fn save_key(key: &str) -> Result<()> {
+        Self::save_key_for(crate::providers::OPENROUTER, key)
+    }
+
+    pub fn save_key_for(provider: &str, key: &str) -> Result<()> {
         let trimmed = key.trim();
         if trimmed.is_empty() {
             anyhow::bail!("API key is empty.");
         }
-        Self::entry_for(SERVICE)?
+        Self::entry_for(&service_for(provider), USER)?
             .set_password(trimmed)
             .context("Failed to write API key to system credential store")
     }
 
     pub fn delete_key() -> anyhow::Result<()> {
-        Self::delete_service(SERVICE)?;
-        // Best-effort cleanup of a leftover legacy entry.
-        let _ = Self::delete_service(LEGACY_SERVICE);
+        Self::delete_key_for(crate::providers::OPENROUTER)
+    }
+
+    pub fn delete_key_for(provider: &str) -> anyhow::Result<()> {
+        Self::delete_service(&service_for(provider), USER)?;
+        if provider == crate::providers::OPENROUTER {
+            let _ = Self::delete_service(SERVICE, LEGACY_USER);
+            let _ = Self::delete_service(LEGACY_SERVICE, LEGACY_USER);
+        }
         Ok(())
     }
 }

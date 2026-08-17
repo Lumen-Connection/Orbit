@@ -8,7 +8,7 @@ use crate::providers::{
 use crate::security::{ApprovalDecision, Policy};
 use crate::session::agent_loop::{TurnDeps, TurnResult, dispatch_tool, run_turn};
 use crate::session::{AgentEvent, ApprovalBridge, BudgetBridge, Session, SessionId, SessionLimits};
-use crate::tools::ToolRegistry;
+use crate::tools::{Tool, ToolRegistry};
 use crate::workspace::{FilePatch, Project, apply_patch};
 use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream};
@@ -142,6 +142,7 @@ fn deps(
         recent_keep: crate::session::context_window::DEFAULT_RECENT_KEEP,
         run_env: crate::session::agent_loop::RunEnv::default(),
         user_images: Vec::new(),
+        subagents: None,
     }
 }
 
@@ -286,6 +287,125 @@ async fn two_sessions_handoff_matches_digest() {
     assert!(handoff.is_interesting());
     assert!(digest.text.contains(handoff.digest_section.trim()));
     assert!(handoff.digest_section.contains("src/lib.rs"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skill_created_in_one_session_appears_in_another_sessions_digest() {
+    let (_tmp, project, store) = fixture();
+    let dir = project
+        .canonical_root
+        .join(".orbit/skills/run-integration-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        crate::context::skills::render_skill_file(
+            "run-integration-tests",
+            "How to run the integration suite.",
+            "SECRET BODY: spin up the ephemeral database first.",
+        ),
+    )
+    .unwrap();
+    {
+        let mut s = store.lock().unwrap();
+        s.reload();
+        assert_eq!(s.skills.len(), 1);
+        let digest = build_digest(&s, &SessionId::new("bbb"), &project.name);
+        assert!(digest.text.contains("Available skills (1):"));
+        assert!(digest.text.contains("run-integration-tests"));
+        assert!(digest.text.contains("How to run the integration suite."));
+        assert!(
+            !digest.text.contains("SECRET BODY"),
+            "skill body must not enter the digest: {}",
+            digest.text
+        );
+    }
+    let ctx = crate::tools::ToolContext {
+        session: SessionId::new("bbb"),
+        cancel: CancellationToken::new(),
+        project: Some(project.clone()),
+        allow_sensitive: false,
+        proposed_patches: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        allow_execute: false,
+        command_timeout: crate::tools::shell::COMMAND_TIMEOUT,
+        terminal: None,
+        store: Some(store),
+        session_label: "review".into(),
+        session_model: "model-b".into(),
+        session_role: crate::session::AgentRole::Coder,
+        runner: None,
+        run_configs: None,
+        run_starts: None,
+        db: None,
+        subagents: None,
+        budget_usd: None,
+    };
+    let out = crate::tools::skills::ReadSkill
+        .execute(serde_json::json!({"name": "run-integration-tests"}), &ctx)
+        .await
+        .unwrap();
+    assert!(out.content.contains("SECRET BODY"));
+}
+
+#[test]
+fn hub_resolves_models_to_their_provider() {
+    use crate::providers::catalog::ModelCatalog;
+    use crate::providers::{ANTHROPIC, OPENROUTER, ProviderHub};
+    let mut hub = ProviderHub::default();
+    hub.insert(Arc::new(Script {
+        turn: AtomicUsize::new(0),
+    }));
+    // Scripted provider id is "e2e"; catalog curated models default to openrouter.
+    let catalog = ModelCatalog::curated();
+    assert_eq!(
+        catalog.find("claude-sonnet-4-6").unwrap().provider_id,
+        ANTHROPIC
+    );
+    assert_eq!(
+        catalog.find("anthropic/claude-opus-5").unwrap().provider_id,
+        OPENROUTER
+    );
+    let _ = hub;
+}
+
+#[test]
+fn search_history_finds_same_project_and_hides_the_other() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = crate::storage::db::Db::open_at(tmp.path().join("orbit.db")).unwrap();
+    let root_a = tmp.path().join("proj-a");
+    let root_b = tmp.path().join("proj-b");
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    let project_a = Project::open(&root_a).unwrap();
+    let project_b = Project::open(&root_b).unwrap();
+    db.upsert_project(&project_a).unwrap();
+    db.upsert_project(&project_b).unwrap();
+    let id_a = SessionId::new("sess-a");
+    let id_b = SessionId::new("sess-b");
+    db.upsert_session(&project_a.id, &id_a, "implementation", "e2e")
+        .unwrap();
+    db.upsert_session(&project_b.id, &id_b, "other", "e2e")
+        .unwrap();
+    db.replace_messages(
+        &id_a,
+        &[crate::providers::ChatMessage::user(
+            "we already chose rusqlite for the zebra index",
+        )],
+    )
+    .unwrap();
+    db.replace_messages(
+        &id_b,
+        &[crate::providers::ChatMessage::user(
+            "we already chose postgres for the zebra index",
+        )],
+    )
+    .unwrap();
+    let hits = db
+        .search_history_scoped(&project_a.id, "zebra", 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item_id, "sess-a");
+    assert!(hits[0].snippet.to_lowercase().contains("rusqlite"));
+    assert!(!hits.iter().any(|h| h.item_id == "sess-b"));
 }
 
 #[tokio::test]

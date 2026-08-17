@@ -47,9 +47,11 @@ allowed = []
 [context]
 recent_decisions = 10
 token_cap = 4000
+max_skills = 50
 
 [budget]
 session_usd = 2.0
+subagent_fraction = 0.25
 ";
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,10 @@ pub struct DigestSettings {
     /// Optional cheaper model for context-window summarization. If empty, the
     /// session's own model is used (unchanged behavior).
     pub summary_model: Option<String>,
+    /// Cap on skill names listed in the digest. Bodies are never injected.
+    pub max_skills: usize,
+    /// Fraction of the remaining session budget given to a spawned subagent.
+    pub subagent_budget_fraction: f64,
 }
 
 impl Default for DigestSettings {
@@ -69,6 +75,8 @@ impl Default for DigestSettings {
             token_cap: 4000,
             session_budget_usd: 2.0,
             summary_model: None,
+            max_skills: 50,
+            subagent_budget_fraction: 0.25,
         }
     }
 }
@@ -161,6 +169,7 @@ pub struct OrbitStore {
     pub findings: Vec<Finding>,
     pub tasks: Vec<TaskItem>,
     pub sessions: Vec<SessionRecord>,
+    pub skills: Vec<crate::context::Skill>,
     pub warnings: Vec<String>,
     pub settings: DigestSettings,
 }
@@ -185,6 +194,7 @@ impl OrbitStore {
             findings: Vec::new(),
             tasks: Vec::new(),
             sessions: Vec::new(),
+            skills: Vec::new(),
             warnings,
             settings: DigestSettings::default(),
         };
@@ -212,6 +222,10 @@ impl OrbitStore {
             }
         }
         self.settings = load_digest_settings(&self.dir.join(CONFIG_TOML));
+        let (skills, w) =
+            crate::context::skills::load_all(&self.dir.join(crate::context::skills::SKILLS_DIR));
+        warnings.extend(w);
+        self.skills = skills;
         self.warnings = warnings;
     }
 
@@ -379,6 +393,8 @@ fn ensure_layout(dir: &Path) -> Result<(), String> {
     write_if_missing(&dir.join(TASKS_MD), DEFAULT_TASKS)?;
     write_if_missing(&dir.join(SESSIONS_JSON), "{\n  \"sessions\": []\n}\n")?;
     write_if_missing(&dir.join(CONFIG_TOML), DEFAULT_CONFIG)?;
+    std::fs::create_dir_all(dir.join(crate::context::skills::SKILLS_DIR))
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -466,6 +482,16 @@ fn load_digest_settings(path: &Path) -> DigestSettings {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string()),
+        max_skills: ctx
+            .and_then(|c| c.get("max_skills"))
+            .and_then(|v| v.as_integer())
+            .map(|n| n.clamp(1, 500) as usize)
+            .unwrap_or(50),
+        subagent_budget_fraction: budget
+            .and_then(|b| b.get("subagent_fraction"))
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
+            .map(|n| n.clamp(0.05, 0.5))
+            .unwrap_or(0.25),
     }
 }
 
@@ -773,7 +799,12 @@ mod tests {
         ] {
             assert!(dir.join(name).exists(), "{name}");
         }
+        assert!(
+            dir.join(crate::context::skills::SKILLS_DIR).is_dir(),
+            "skills/"
+        );
         assert!(store.warnings.is_empty(), "{:?}", store.warnings);
+        assert!(store.skills.is_empty());
     }
 
     #[test]
@@ -900,5 +931,23 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let store = OrbitStore::open(&root);
         assert_eq!(store.settings.summary_model, None);
+    }
+
+    #[test]
+    fn skill_without_frontmatter_warns_and_does_not_crash() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut store = OrbitStore::open(&root);
+        let dir = store.dir.join("skills").join("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "no frontmatter here\n").unwrap();
+        store.reload();
+        assert!(store.skills.is_empty());
+        assert!(
+            store.warnings.iter().any(|w| w.contains("frontmatter")),
+            "{:?}",
+            store.warnings
+        );
     }
 }

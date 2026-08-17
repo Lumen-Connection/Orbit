@@ -336,6 +336,12 @@ pub struct ModelInfo {
     pub supports_tools: bool,
     #[serde(default)]
     pub supports_vision: bool,
+    #[serde(default = "default_provider_id")]
+    pub provider_id: String,
+}
+
+fn default_provider_id() -> String {
+    crate::providers::OPENROUTER.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,10 +464,48 @@ fn curated_models() -> Vec<ModelInfo> {
             context_length: None,
             prompt_price: None,
             completion_price: None,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: looks_multimodal(m.id),
+            provider_id: crate::providers::OPENROUTER.to_string(),
         })
+        .chain(
+            crate::providers::anthropic::CURATED
+                .iter()
+                .map(|(id, name, tools)| ModelInfo {
+                    id: (*id).to_string(),
+                    name: (*name).to_string(),
+                    descriptor: Some("Anthropic API (direct)".into()),
+                    context_length: Some(200_000),
+                    prompt_price: None,
+                    completion_price: None,
+                    supports_tools: *tools,
+                    supports_vision: true,
+                    provider_id: crate::providers::ANTHROPIC.to_string(),
+                }),
+        )
         .collect()
+}
+
+/// Group models by `provider_id` for the model picker.
+pub fn group_by_provider(models: &[&ModelInfo]) -> Vec<(String, Vec<ModelInfo>)> {
+    let mut groups: Vec<(String, Vec<ModelInfo>)> = Vec::new();
+    for model in models {
+        if let Some((_, bucket)) = groups.iter_mut().find(|(id, _)| id == &model.provider_id) {
+            bucket.push((*model).clone());
+        } else {
+            groups.push((model.provider_id.clone(), vec![(*model).clone()]));
+        }
+    }
+    groups
+}
+
+pub fn provider_label(id: &str) -> &'static str {
+    match id {
+        crate::providers::OPENROUTER => "OpenRouter",
+        crate::providers::ANTHROPIC => "Anthropic",
+        crate::providers::OPENAI_COMPAT => "Local / OpenAI-compatible",
+        _ => "Other",
+    }
 }
 
 fn looks_multimodal(id: &str) -> bool {
@@ -487,6 +531,20 @@ mod tests {
             m.id.to_ascii_lowercase().contains("claude")
                 || m.name.to_ascii_lowercase().contains("claude")
         }));
+    }
+
+    #[test]
+    fn curated_anthropic_models_are_direct() {
+        let catalog = ModelCatalog::curated();
+        let claude = catalog
+            .find("claude-sonnet-4-6")
+            .expect("direct anthropic model");
+        assert_eq!(claude.provider_id, crate::providers::ANTHROPIC);
+        assert!(claude.supports_tools);
+        let via_or = catalog
+            .find("anthropic/claude-opus-5")
+            .expect("openrouter id");
+        assert_eq!(via_or.provider_id, crate::providers::OPENROUTER);
     }
 
     #[test]

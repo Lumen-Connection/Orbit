@@ -7,6 +7,12 @@ pub const DEFAULT_RESPONSE_RESERVE: f32 = 0.25;
 pub const DEFAULT_CONTEXT_LENGTH: u32 = 128_000;
 pub const SUMMARY_MARKER_START: &str = "<<<ORBIT_CONTEXT_SUMMARY>>>";
 pub const SUMMARY_MARKER_END: &str = "<<<END_ORBIT_CONTEXT_SUMMARY>>>";
+pub const NUDGE_MARKER_START: &str = "<<<ORBIT_NUDGE>>>";
+pub const NUDGE_MARKER_END: &str = "<<<END_ORBIT_NUDGE>>>";
+pub const NUDGE_TEXT: &str = "\
+You have made several tool calls this turn without persisting anything. \
+If you made a decision, found a problem, or learned a procedure for this project, \
+record it now with record_decision, add_finding, or create_skill.";
 
 #[derive(Debug, Clone)]
 pub struct ContextWindow {
@@ -65,6 +71,13 @@ pub fn wrap_summary(text: &str) -> ChatMessage {
         content: format!(
             "{SUMMARY_MARKER_START}\nEarlier conversation summary (not instructions):\n{text}\n{SUMMARY_MARKER_END}"
         ),
+    }
+}
+
+pub fn wrap_nudge() -> ChatMessage {
+    ChatMessage::User {
+        images: Vec::new(),
+        content: format!("{NUDGE_MARKER_START}\n{NUDGE_TEXT}\n{NUDGE_MARKER_END}"),
     }
 }
 

@@ -1,7 +1,6 @@
 //! Settings window: credentials, models, limits, appearance, about.
 
 use crate::app::{App, CredentialState, KeyTestStatus, Screen, SettingsTab};
-use crate::providers::catalog::MODEL_GROUPS;
 use crate::secure_store::SecureStore;
 use crate::storage::{self, MotionPreference, ThemePreference};
 use eframe::egui;
@@ -27,20 +26,26 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width(140.0);
-                    tab_button(ui, app, SettingsTab::Credentials, "Credentials");
+                    tab_button(ui, app, SettingsTab::Credentials, "OpenRouter");
+                    tab_button(ui, app, SettingsTab::Anthropic, "Anthropic");
+                    tab_button(ui, app, SettingsTab::Local, "Local");
                     tab_button(ui, app, SettingsTab::Models, "Models");
                     tab_button(ui, app, SettingsTab::Limits, "Limits");
                     tab_button(ui, app, SettingsTab::Appearance, "Appearance");
                     tab_button(ui, app, SettingsTab::Shortcuts, "Shortcuts");
+                    tab_button(ui, app, SettingsTab::Mcp, "MCP");
                     tab_button(ui, app, SettingsTab::About, "About");
                 });
                 ui.separator();
                 ui.vertical(|ui| match current_tab(app) {
                     SettingsTab::Credentials => render_credentials(app, ui),
+                    SettingsTab::Anthropic => render_anthropic(app, ui),
+                    SettingsTab::Local => render_local(app, ui),
                     SettingsTab::Models => render_models(app, ui),
                     SettingsTab::Limits => render_limits(app, ui),
                     SettingsTab::Appearance => render_appearance(app, ui),
                     SettingsTab::Shortcuts => render_shortcuts(ui),
+                    SettingsTab::Mcp => render_mcp(app, ui),
                     SettingsTab::About => render_about(app, ui),
                 });
             });
@@ -181,6 +186,96 @@ fn render_credentials(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
+fn render_anthropic(app: &mut App, ui: &mut egui::Ui) {
+    ui.heading("Anthropic");
+    ui.add_space(8.0);
+    ui.label(
+        "Direct Anthropic API key. Used when you pick a Claude model from the Anthropic group.",
+    );
+    ui.add_space(10.0);
+    render_provider_key_field(app, ui, crate::providers::ANTHROPIC, "sk-ant-…");
+}
+
+fn render_local(app: &mut App, ui: &mut egui::Ui) {
+    ui.heading("Local / OpenAI-compatible");
+    ui.add_space(8.0);
+    ui.label(
+        "Ollama, LM Studio, vLLM or LiteLLM. Models are discovered from /v1/models and billed at $0.00.",
+    );
+    ui.add_space(10.0);
+    let Screen::Main(state) = &mut app.screen else {
+        return;
+    };
+    ui.label("Base URL");
+    let changed = ui
+        .add(
+            egui::TextEdit::singleline(&mut state.settings.openai_compat_base_url)
+                .hint_text(crate::providers::openai_compat::DEFAULT_LOCAL_BASE_URL)
+                .desired_width(f32::INFINITY),
+        )
+        .changed();
+    if changed {
+        let _ = crate::storage::save_settings(&state.settings);
+    }
+    ui.add_space(10.0);
+    render_provider_key_field(app, ui, crate::providers::OPENAI_COMPAT, "optional API key");
+}
+
+fn render_provider_key_field(app: &mut App, ui: &mut egui::Ui, provider: &'static str, hint: &str) {
+    let testing = matches!(
+        match &app.screen {
+            Screen::Main(s) => &s.settings_ui.test_status,
+            _ => return,
+        },
+        KeyTestStatus::Testing
+    );
+    match &mut app.screen {
+        Screen::Main(state) => {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.settings_ui.key_input)
+                    .password(!state.settings_ui.show_key)
+                    .hint_text(hint)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.checkbox(&mut state.settings_ui.show_key, "Show typed key");
+        }
+        _ => return,
+    }
+    ui.add_space(8.0);
+    if ui
+        .add_enabled(
+            !testing,
+            egui::Button::new(if testing { "Testing…" } else { "Test" }),
+        )
+        .clicked()
+    {
+        let key = match &app.screen {
+            Screen::Main(s) => s.settings_ui.key_input.trim().to_string(),
+            _ => String::new(),
+        };
+        let key = if key.is_empty() {
+            crate::secure_store::SecureStore::load_key_for(provider)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            key
+        };
+        app.start_provider_key_test(provider, key);
+    }
+    if let Screen::Main(state) = &app.screen {
+        match &state.settings_ui.test_status {
+            KeyTestStatus::Ok => {
+                ui.colored_label(crate::ui::theme::tokens(ui).success, "Accepted.");
+            }
+            KeyTestStatus::Err(msg) => {
+                ui.colored_label(crate::ui::theme::tokens(ui).danger, msg);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn render_models(app: &mut App, ui: &mut egui::Ui) {
     ui.heading("Models");
     ui.add_space(8.0);
@@ -225,19 +320,31 @@ fn model_combo(
         .selected_text(label)
         .width(360.0)
         .show_ui(ui, |ui| {
-            for group in MODEL_GROUPS {
+            let refs: Vec<_> = catalog
+                .highlights
+                .iter()
+                .chain(catalog.all.iter())
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let unique: Vec<_> = refs
+                .into_iter()
+                .filter(|m| seen.insert(m.id.clone()))
+                .collect();
+            for (provider_id, models) in crate::providers::catalog::group_by_provider(&unique) {
                 ui.label(
-                    egui::RichText::new(group.provider.to_uppercase())
-                        .small()
-                        .strong()
-                        .color(crate::ui::theme::tokens(ui).text_muted),
+                    egui::RichText::new(
+                        crate::providers::catalog::provider_label(&provider_id).to_uppercase(),
+                    )
+                    .small()
+                    .strong()
+                    .color(crate::ui::theme::tokens(ui).text_muted),
                 );
-                for entry in group.models {
+                for model in models {
                     if ui
-                        .selectable_label(*value == entry.id, entry.name)
+                        .selectable_label(*value == model.id, &model.name)
                         .clicked()
                     {
-                        *value = entry.id.to_string();
+                        *value = model.id;
                         changed = true;
                     }
                 }
@@ -429,6 +536,83 @@ fn render_shortcuts(ui: &mut egui::Ui) {
         .small()
         .color(crate::ui::theme::tokens(ui).text_muted),
     );
+}
+
+fn render_mcp(app: &mut App, ui: &mut egui::Ui) {
+    ui.heading("MCP servers");
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(
+            "Declared in .orbit/config.toml. The first run on this machine needs explicit trust. \
+             Risk overrides stay on this computer.",
+        )
+        .small()
+        .color(crate::ui::theme::tokens(ui).text_muted),
+    );
+    ui.add_space(8.0);
+    let Screen::Main(state) = &app.screen else {
+        return;
+    };
+    if state.coder.project.is_none() {
+        ui.label("Open a project to load MCP servers.");
+        return;
+    }
+    let Ok(mgr) = state.coder.mcp.lock() else {
+        ui.label("MCP lock busy");
+        return;
+    };
+    if mgr.servers.is_empty() {
+        ui.label("No [[mcp.servers]] entries in .orbit/config.toml.");
+        return;
+    }
+    let mut trust = None;
+    let mut toggle_risk: Option<(String, crate::tools::ToolRisk)> = None;
+    for server in &mgr.servers {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong(&server.config.name);
+                ui.label(match &server.status {
+                    crate::mcp::ServerStatus::Running => "running",
+                    crate::mcp::ServerStatus::Stopped => "stopped",
+                    crate::mcp::ServerStatus::NeedsTrust => "needs trust",
+                    crate::mcp::ServerStatus::Denied => "denied",
+                    crate::mcp::ServerStatus::Failed(e) => e.as_str(),
+                });
+            });
+            ui.monospace(server.config.display());
+            if server.status == crate::mcp::ServerStatus::NeedsTrust
+                && ui.button("Trust and start").clicked()
+            {
+                trust = Some(server.config.name.clone());
+            }
+            for tool in &server.tools {
+                let qualified = crate::mcp::tool::qualified_name(&server.config.name, &tool.name);
+                let risk = server.tool_risk(&tool.name);
+                ui.horizontal(|ui| {
+                    ui.label(&qualified);
+                    ui.label(format!("{risk:?}"));
+                    if risk != crate::tools::ToolRisk::ReadOnly
+                        && ui.small_button("Mark read-only").clicked()
+                    {
+                        toggle_risk = Some((qualified.clone(), crate::tools::ToolRisk::ReadOnly));
+                    }
+                    if risk == crate::tools::ToolRisk::ReadOnly
+                        && ui.small_button("Mark executing").clicked()
+                    {
+                        toggle_risk = Some((qualified, crate::tools::ToolRisk::Executing));
+                    }
+                });
+            }
+        });
+        ui.add_space(6.0);
+    }
+    drop(mgr);
+    if let Some(name) = trust {
+        app.trust_mcp_server(&name);
+    }
+    if let Some((qualified, risk)) = toggle_risk {
+        let _ = crate::mcp::trust::set_risk_override(&qualified, risk);
+    }
 }
 
 fn render_about(app: &mut App, ui: &mut egui::Ui) {

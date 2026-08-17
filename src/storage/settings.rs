@@ -52,6 +52,9 @@ pub struct AppSettings {
     pub motion: MotionPreference,
     #[serde(default = "default_recent_keep")]
     pub context_recent_messages: usize,
+    /// Base URL for an OpenAI-compatible server (`/v1`). Empty disables it.
+    #[serde(default)]
+    pub openai_compat_base_url: String,
 }
 
 fn default_model() -> String {
@@ -90,6 +93,7 @@ impl Default for AppSettings {
             font_scale: default_font_scale(),
             motion: MotionPreference::Full,
             context_recent_messages: default_recent_keep(),
+            openai_compat_base_url: String::new(),
         }
     }
 }
@@ -198,6 +202,7 @@ mod tests {
             font_scale: 9.0,
             motion: MotionPreference::Reduced,
             context_recent_messages: 0,
+            openai_compat_base_url: String::new(),
         }
         .sanitized();
         assert_eq!(settings.chat_default_model, DEFAULT_MODEL);

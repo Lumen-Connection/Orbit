@@ -4,7 +4,10 @@
 //! Trait signatures never mention `reqwest`.
 
 pub mod accumulate;
+pub mod anthropic;
 pub mod catalog;
+pub mod chat_completions;
+pub mod openai_compat;
 pub mod openrouter;
 pub mod retry;
 pub mod sse;
@@ -12,9 +15,14 @@ pub mod sse;
 use async_trait::async_trait;
 use catalog::ModelInfo;
 use futures_util::stream::BoxStream;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+pub const OPENROUTER: &str = "openrouter";
+pub const ANTHROPIC: &str = "anthropic";
+pub const OPENAI_COMPAT: &str = "openai-compat";
 
 pub type ModelId = String;
 pub type ToolCallId = String;
@@ -160,6 +168,8 @@ pub struct AiModel {
     pub prompt_price: Option<f64>,
     /// Per-token completion price when the provider publishes one.
     pub completion_price: Option<f64>,
+    /// Which `AiProvider::id` serves this model (`openrouter`, `anthropic`, …).
+    pub provider_id: String,
 }
 
 impl From<AiModel> for ModelInfo {
@@ -173,6 +183,7 @@ impl From<AiModel> for ModelInfo {
             completion_price: model.completion_price,
             supports_tools: model.supports_tools,
             supports_vision: model.supports_vision,
+            provider_id: model.provider_id,
         }
     }
 }
@@ -194,6 +205,34 @@ pub trait AiProvider: Send + Sync {
 
     #[allow(dead_code)]
     fn supports_tools(&self, model: &ModelId) -> bool;
+}
+
+/// In-process map of configured backends, keyed by `AiProvider::id`.
+#[derive(Clone, Default)]
+pub struct ProviderHub {
+    map: HashMap<String, Arc<dyn AiProvider>>,
+}
+
+impl ProviderHub {
+    pub fn insert(&mut self, provider: Arc<dyn AiProvider>) {
+        self.map.insert(provider.id().to_string(), provider);
+    }
+
+    pub fn get(&self, id: &str) -> Option<Arc<dyn AiProvider>> {
+        self.map.get(id).cloned()
+    }
+
+    pub fn resolve(
+        &self,
+        model: &str,
+        catalog: &crate::providers::catalog::ModelCatalog,
+    ) -> Option<Arc<dyn AiProvider>> {
+        let provider_id = catalog
+            .find(model)
+            .map(|m| m.provider_id.as_str())
+            .unwrap_or(OPENROUTER);
+        self.get(provider_id).or_else(|| self.get(OPENROUTER))
+    }
 }
 
 /// Build the OpenRouter adapter without exposing its concrete type.

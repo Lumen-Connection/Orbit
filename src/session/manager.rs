@@ -44,6 +44,8 @@ pub struct LiveSession {
     pub budget_bridge: Arc<BudgetBridge>,
     pub context_occupancy: Option<f32>,
     pub retry_hint: Option<String>,
+    pub parent_id: Option<SessionId>,
+    pub parent_label: Option<String>,
 }
 
 impl LiveSession {
@@ -76,6 +78,8 @@ impl LiveSession {
             budget_bridge: BudgetBridge::new(),
             context_occupancy: None,
             retry_hint: None,
+            parent_id: None,
+            parent_label: None,
         }
     }
 
@@ -114,6 +118,7 @@ pub struct SessionManager {
     pub sessions: Vec<LiveSession>,
     pub active: usize,
     pub slots: Arc<Semaphore>,
+    pub pending_subagents: Arc<std::sync::Mutex<Vec<crate::session::subagent::PendingSubagent>>>,
 }
 
 impl Default for SessionManager {
@@ -128,6 +133,7 @@ impl SessionManager {
             sessions: Vec::new(),
             active: 0,
             slots: Arc::new(Semaphore::new(DEFAULT_SESSION_SLOTS)),
+            pending_subagents: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -203,7 +209,36 @@ impl SessionManager {
         self.active = 0;
     }
 
+    pub fn drain_pending_subagents(&mut self) {
+        let pending = self
+            .pending_subagents
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default();
+        for item in pending {
+            if self.sessions.iter().any(|s| s.id == item.id) {
+                continue;
+            }
+            let mut live =
+                LiveSession::from_session(Session::new(item.label.clone(), item.model.clone()));
+            live.id = item.id.clone();
+            live.label = item.label;
+            live.model = item.model;
+            live.role = item.role;
+            live.handle = item.handle;
+            live.agent_rx = Some(item.agent_rx);
+            live.agent_cancel = Some(item.agent_cancel);
+            live.approvals = item.approvals;
+            live.busy = true;
+            live.budget_usd = item.budget_usd;
+            live.parent_id = Some(item.parent_id);
+            live.parent_label = Some(item.parent_label);
+            self.sessions.push(live);
+        }
+    }
+
     pub fn poll_all_detailed(&mut self) -> SessionPoll {
+        self.drain_pending_subagents();
         let mut unauthorized = false;
         for session in &mut self.sessions {
             let Some(rx) = &session.agent_rx else {
@@ -495,6 +530,7 @@ mod tests {
             recent_keep: crate::session::context_window::DEFAULT_RECENT_KEEP,
             run_env: crate::session::agent_loop::RunEnv::default(),
             user_images: Vec::new(),
+            subagents: None,
         }
     }
 

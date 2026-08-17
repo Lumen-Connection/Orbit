@@ -4,8 +4,11 @@
 pub mod context;
 pub mod fs;
 pub mod git;
+pub mod history;
 pub mod run;
 pub mod shell;
+pub mod skills;
+pub mod subagent;
 
 use crate::providers::ToolSchema;
 use crate::session::SessionId;
@@ -63,6 +66,9 @@ pub struct ToolContext {
     pub run_configs: Option<Vec<crate::workspace::run_config::RunConfig>>,
     pub run_starts:
         Option<std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>>>,
+    pub db: Option<std::sync::Arc<crate::storage::db::Db>>,
+    pub subagents: Option<std::sync::Arc<crate::session::subagent::SubagentHost>>,
+    pub budget_usd: Option<f64>,
 }
 
 impl ToolContext {
@@ -83,14 +89,17 @@ impl ToolContext {
             runner: None,
             run_configs: None,
             run_starts: None,
+            db: None,
+            subagents: None,
+            budget_usd: None,
         }
     }
 }
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     fn schema(&self) -> serde_json::Value;
     fn risk(&self) -> ToolRisk;
 
@@ -136,6 +145,15 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    pub fn unregister(&mut self, name: &str) {
+        self.tools.remove(name);
+    }
+
+    pub fn retain_readonly(&mut self) {
+        self.tools
+            .retain(|_, tool| tool.risk() == ToolRisk::ReadOnly);
+    }
+
     pub fn schemas(&self) -> Vec<ToolSchema> {
         let mut schemas: Vec<ToolSchema> = self
             .tools
@@ -172,6 +190,10 @@ impl ToolRegistry {
         registry.register(Arc::new(git::GitStatus));
         registry.register(Arc::new(git::GitCommit));
         registry.register(Arc::new(git::GitPush));
+        registry.register(Arc::new(skills::ReadSkill));
+        registry.register(Arc::new(skills::CreateSkill));
+        registry.register(Arc::new(history::SearchHistory));
+        registry.register(Arc::new(subagent::SpawnSubagent));
         registry
     }
 
@@ -283,18 +305,18 @@ mod tests {
 
     #[test]
     fn for_role_narrows_the_catalog_size() {
-        assert_eq!(ToolRegistry::for_role(AgentRole::Coder).schemas().len(), 15);
+        assert_eq!(ToolRegistry::for_role(AgentRole::Coder).schemas().len(), 19);
         assert_eq!(
             ToolRegistry::for_role(AgentRole::Reviewer).schemas().len(),
-            13
+            15
         );
         assert_eq!(
             ToolRegistry::for_role(AgentRole::Architect).schemas().len(),
-            8
+            11
         );
         assert_eq!(
             ToolRegistry::for_role(AgentRole::Tester).schemas().len(),
-            15
+            19
         );
     }
 
@@ -304,11 +326,19 @@ mod tests {
         assert!(reviewer.get("write_file").is_none());
         assert!(reviewer.get("edit_file").is_none());
         assert!(reviewer.get("read_file").is_some());
+        assert!(reviewer.get("read_skill").is_some());
+        assert!(reviewer.get("create_skill").is_none());
 
         let architect = ToolRegistry::for_role(AgentRole::Architect);
         assert!(architect.get("run_command").is_none());
         assert!(architect.get("write_file").is_none());
         assert!(architect.get("record_decision").is_some());
+        assert!(architect.get("read_skill").is_some());
+        assert!(architect.get("create_skill").is_some());
+        assert!(architect.get("spawn_subagent").is_none());
+
+        let coder = ToolRegistry::for_role(AgentRole::Coder);
+        assert!(coder.get("spawn_subagent").is_some());
     }
 
     #[test]

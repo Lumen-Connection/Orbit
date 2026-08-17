@@ -1,9 +1,7 @@
 //! Coder session transcript: messages, tool rows, input.
 
 use super::approvals;
-use crate::app::{
-    App, CredentialState, MODEL_GROUPS, Screen, SettingsTab, can_create_session, credential_state,
-};
+use crate::app::{App, CredentialState, Screen, SettingsTab, can_create_session, credential_state};
 use crate::session::roles::AgentRole;
 use crate::session::{SessionId, TranscriptItem};
 use eframe::egui;
@@ -30,7 +28,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     let mut commit_edit = false;
     let mut cancel_edit = false;
     let mut export = false;
-    let mut open_pipeline = false;
+    let open_pipeline = false;
     let mut select_search: Option<SessionId> = None;
 
     {
@@ -179,10 +177,16 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                         rename = Some((session.id.clone(), session.label.clone()));
                     }
                 } else {
-                    let tab = ui.selectable_label(
-                        selected,
-                        format!("{} {}{mark}", session.role.icon(), session.label),
-                    );
+                    let tab_label = if let Some(parent) = &session.parent_label {
+                        format!(
+                            "↳ {} {} · from {parent}{mark}",
+                            session.role.icon(),
+                            session.label
+                        )
+                    } else {
+                        format!("{} {}{mark}", session.role.icon(), session.label)
+                    };
+                    let tab = ui.selectable_label(selected, tab_label);
                     if tab.clicked() {
                         select = Some(session.id.clone());
                     }
@@ -244,32 +248,41 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                         "Role switching takes effect on the next turn when this session is not busy.",
                     );
                     let label = state.catalog.display_name(&live.model);
+                    let catalog = &state.catalog;
                     egui::ComboBox::from_id_salt("coder_model")
                         .selected_text(label)
                         .width(220.0)
                         .show_ui(ui, |ui| {
-                            for group in MODEL_GROUPS {
+                            let refs: Vec<_> =
+                                catalog.highlights.iter().chain(catalog.all.iter()).collect();
+                            let mut seen = std::collections::HashSet::new();
+                            let unique: Vec<_> = refs
+                                .into_iter()
+                                .filter(|m| seen.insert(m.id.clone()))
+                                .collect();
+                            for (provider_id, models) in
+                                crate::providers::catalog::group_by_provider(&unique)
+                            {
                                 ui.label(
-                                    egui::RichText::new(group.provider.to_uppercase())
-                                        .small()
-                                        .strong()
-                                        .color(palette.text_muted),
+                                    egui::RichText::new(
+                                        crate::providers::catalog::provider_label(&provider_id)
+                                            .to_uppercase(),
+                                    )
+                                    .small()
+                                    .strong()
+                                    .color(palette.text_muted),
                                 );
-                                for entry in group.models {
+                                for model in models {
                                     if ui
-                                        .selectable_label(live.model == entry.id, entry.name)
+                                        .selectable_label(live.model == model.id, &model.name)
                                         .clicked()
                                     {
-                                        new_model = Some(entry.id.to_string());
+                                        new_model = Some(model.id);
                                     }
                                 }
                             }
                             let current = live.model.clone();
-                            if !MODEL_GROUPS
-                                .iter()
-                                .flat_map(|g| g.models)
-                                .any(|m| m.id == current)
-                            {
+                            if !unique.iter().any(|m| m.id == current) {
                                 ui.separator();
                                 let _ = ui.selectable_label(true, current);
                             }

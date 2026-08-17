@@ -6,6 +6,7 @@ pub mod export;
 pub mod manager;
 pub mod message_ops;
 pub mod roles;
+pub mod subagent;
 
 pub use manager::SessionManager;
 

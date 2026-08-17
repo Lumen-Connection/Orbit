@@ -8,6 +8,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     app.refresh_context_if_stale();
 
     let mut open_folder = false;
+    let mut open_skill = None;
     {
         let Screen::Main(state) = &mut app.screen else {
             return;
@@ -117,6 +118,29 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
 
+        egui::CollapsingHeader::new(format!("Skills ({})", store.skills.len()))
+            .id_salt("ctx_skills")
+            .default_open(state.coder.expand_skills)
+            .show(ui, |ui| {
+                if store.skills.is_empty() {
+                    ui.label(muted(ui, "None yet."));
+                }
+                let selected = state.coder.selected.clone();
+                for skill in &store.skills {
+                    let rel = skill.relative_path();
+                    let is_selected = selected.as_ref().is_some_and(|p| p == &rel);
+                    if ui
+                        .selectable_label(
+                            is_selected,
+                            format!("{} — {}", skill.name, skill.description),
+                        )
+                        .clicked()
+                    {
+                        open_skill = Some(rel);
+                    }
+                }
+            });
+
         ui.add_space(10.0);
         let project_name = state
             .coder
@@ -178,6 +202,9 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
 
     if open_folder {
         app.open_orbit_folder();
+    }
+    if let Some(path) = open_skill {
+        app.select_file(path);
     }
     ui.add_space(12.0);
     ui.separator();
