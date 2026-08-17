@@ -5,7 +5,6 @@ use landlock::{
     ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
     RulesetCreatedAttr, path_beneath_rules,
 };
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 pub fn probe() -> SandboxStatus {
