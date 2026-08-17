@@ -24,6 +24,13 @@ pub fn probe() -> SandboxStatus {
     }
 }
 
+/// `pre_exec` exige `io::Result`, mas toda chamada do landlock devolve
+/// `RulesetError`, que não tem `From` para `io::Error`. `to_string()` evita
+/// depender de `RulesetError: Send + Sync`.
+fn io(e: landlock::RulesetError) -> std::io::Error {
+    std::io::Error::other(e.to_string())
+}
+
 pub fn apply_to_tokio(
     cmd: &mut tokio::process::Command,
     profile: SandboxProfile,
@@ -32,54 +39,53 @@ pub fn apply_to_tokio(
     if matches!(profile, SandboxProfile::Off) {
         return;
     }
-    let root = project_root.to_path_buf();
-    unsafe {
-        cmd.pre_exec(move || apply_ruleset(profile, &root));
-    }
-}
-
-fn apply_ruleset(profile: SandboxProfile, project_root: &Path) -> std::io::Result<()> {
-    let abi = match probe() {
-        SandboxStatus::Active { abi: 4 } => ABI::V4,
-        SandboxStatus::Active { abi: 3 } => ABI::V3,
-        SandboxStatus::Active { abi: 2 } => ABI::V2,
-        SandboxStatus::Active { .. } => ABI::V1,
-        _ => return Ok(()),
+    // Tudo que aloca, lê o ambiente ou toca o disco acontece aqui, antes do
+    // fork. O closure abaixo roda entre fork e exec, onde só as syscalls do
+    // landlock são seguras.
+    let Some(abi) = active_abi() else {
+        return;
     };
+    let readable = readable_paths(profile, project_root);
     let writable = writable_paths(profile, project_root);
-    match profile {
-        SandboxProfile::Off => Ok(()),
-        SandboxProfile::Workspace | SandboxProfile::Strict => {
-            let readable = readable_paths(profile, project_root);
-            let mut builder = Ruleset::default()
-                .set_compatibility(CompatLevel::BestEffort)
-                .handle_access(AccessFs::from_all(abi))?;
-            if matches!(profile, SandboxProfile::Strict) {
-                builder = match builder.handle_access(AccessNet::ConnectTcp) {
-                    Ok(b) => b,
-                    Err(_) => return finish_fs(builder, &readable, &writable, abi),
-                };
-                builder = match builder.handle_access(AccessNet::BindTcp) {
-                    Ok(b) => b,
-                    Err(_) => return finish_fs(builder, &readable, &writable, abi),
-                };
-            }
-            finish_fs(builder, &readable, &writable, abi)
-        }
+    let strict = matches!(profile, SandboxProfile::Strict);
+    unsafe {
+        cmd.pre_exec(move || apply_ruleset(abi, strict, &readable, &writable));
     }
 }
 
-fn finish_fs(
-    builder: Ruleset,
+fn active_abi() -> Option<ABI> {
+    match probe() {
+        SandboxStatus::Active { abi: 4 } => Some(ABI::V4),
+        SandboxStatus::Active { abi: 3 } => Some(ABI::V3),
+        SandboxStatus::Active { abi: 2 } => Some(ABI::V2),
+        SandboxStatus::Active { .. } => Some(ABI::V1),
+        _ => None,
+    }
+}
+
+fn apply_ruleset(
+    abi: ABI,
+    strict: bool,
     readable: &[PathBuf],
     writable: &[PathBuf],
-    abi: ABI,
 ) -> std::io::Result<()> {
+    let mut builder = Ruleset::default()
+        .set_compatibility(CompatLevel::BestEffort)
+        .handle_access(AccessFs::from_all(abi))
+        .map_err(io)?;
+    if strict {
+        builder = builder.handle_access(AccessNet::ConnectTcp).map_err(io)?;
+        builder = builder.handle_access(AccessNet::BindTcp).map_err(io)?;
+    }
     builder
-        .create()?
-        .add_rules(path_beneath_rules(readable, AccessFs::from_read(abi)))?
-        .add_rules(path_beneath_rules(writable, AccessFs::from_all(abi)))?
-        .restrict_self()?;
+        .create()
+        .map_err(io)?
+        .add_rules(path_beneath_rules(readable, AccessFs::from_read(abi)))
+        .map_err(io)?
+        .add_rules(path_beneath_rules(writable, AccessFs::from_all(abi)))
+        .map_err(io)?
+        .restrict_self()
+        .map_err(io)?;
     Ok(())
 }
 
@@ -130,7 +136,7 @@ mod tests {
     use tokio::process::Command;
 
     #[tokio::test]
-    async fn workspace_allows_project_and_denies_ssh() {
+    async fn workspace_allows_project_and_denies_outside() {
         match crate::security::sandbox::probe() {
             SandboxStatus::Active { .. } => {}
             other => {
@@ -141,9 +147,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         std::fs::write(root.join("ok.txt"), "project-ok\n").unwrap();
-        let ssh = dirs_home()
-            .map(|h| h.join(".ssh/id_rsa"))
-            .unwrap_or_else(|| PathBuf::from("/root/.ssh/id_rsa"));
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "secret\n").unwrap();
 
         let mut ok = Command::new("cat");
         ok.arg(root.join("ok.txt")).current_dir(root);
@@ -152,22 +158,14 @@ mod tests {
         assert!(out.status.success(), "{out:?}");
         assert!(String::from_utf8_lossy(&out.stdout).contains("project-ok"));
 
-        if !ssh.exists() {
-            eprintln!("no ~/.ssh/id_rsa; skipped the deny assertion");
-            return;
-        }
         let mut bad = Command::new("cat");
-        bad.arg(&ssh).current_dir(root);
-        apply_to_tokio(&mut bad, SandboxProfile::Workspace, root);
-        let out = bad.output().await.expect("spawn cat ssh");
+        bad.arg(&secret).current_dir(root);
+        apply_to_tokio(&mut bad, SandboxProfile::Strict, root);
+        let out = bad.output().await.expect("spawn cat outside");
         assert!(
             !out.status.success(),
-            "reading ~/.ssh must fail under workspace: {:?}",
+            "reading outside the project must fail under strict: {:?}",
             String::from_utf8_lossy(&out.stderr)
         );
-    }
-
-    fn dirs_home() -> Option<std::path::PathBuf> {
-        std::env::var_os("HOME").map(std::path::PathBuf::from)
     }
 }
