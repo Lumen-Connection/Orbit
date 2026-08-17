@@ -46,6 +46,7 @@ pub struct LiveSession {
     pub retry_hint: Option<String>,
     pub parent_id: Option<SessionId>,
     pub parent_label: Option<String>,
+    pub isolation: crate::session::worktree::Isolation,
 }
 
 impl LiveSession {
@@ -80,6 +81,7 @@ impl LiveSession {
             retry_hint: None,
             parent_id: None,
             parent_label: None,
+            isolation: crate::session::worktree::Isolation::None,
         }
     }
 
@@ -233,6 +235,7 @@ impl SessionManager {
             live.budget_usd = item.budget_usd;
             live.parent_id = Some(item.parent_id);
             live.parent_label = Some(item.parent_label);
+            live.isolation = item.isolation;
             self.sessions.push(live);
         }
     }
@@ -313,13 +316,13 @@ impl SessionManager {
         &mut self,
         id: ApprovalId,
         decision: ApprovalDecision,
-    ) -> Option<(bool, Option<crate::workspace::FilePatch>, SessionId)> {
+    ) -> Option<(bool, Vec<crate::workspace::FilePatch>, SessionId)> {
         for session in &mut self.sessions {
-            let patch = session.transcript.iter().find_map(|item| match item {
-                TranscriptItem::Approval { handle, .. } if handle.id == id => handle.patch.clone(),
+            let patches = session.transcript.iter().find_map(|item| match item {
+                TranscriptItem::Approval { handle, .. } if handle.id == id => Some(handle.files()),
                 _ => None,
             });
-            let has = patch.is_some()
+            let has = patches.is_some()
                 || session.transcript.iter().any(|item| {
                     matches!(item, TranscriptItem::Approval { handle, .. } if handle.id == id)
                 });
@@ -327,7 +330,7 @@ impl SessionManager {
                 let live = session.approvals.is_pending(id);
                 crate::session::mark_approval(&mut session.transcript, id, decision);
                 session.approvals.resolve(id, decision);
-                return Some((live, patch, session.id.clone()));
+                return Some((live, patches.unwrap_or_default(), session.id.clone()));
             }
         }
         None

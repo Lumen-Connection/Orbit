@@ -1,6 +1,7 @@
 //! Project workspace: open, scan, and patch files.
 #![allow(dead_code)]
 
+pub mod git;
 mod patch;
 pub mod registry;
 pub mod run_config;

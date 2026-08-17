@@ -178,10 +178,17 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     }
                 } else {
                     let tab_label = if let Some(parent) = &session.parent_label {
+                        let iso =
+                            if session.isolation == crate::session::worktree::Isolation::Worktree {
+                                " · worktree"
+                            } else {
+                                ""
+                            };
                         format!(
-                            "↳ {} {} · from {parent}{mark}",
+                            "↳ {} {}{iso} · {} · from {parent}{mark}",
                             session.role.icon(),
-                            session.label
+                            session.label,
+                            session.role.label()
                         )
                     } else {
                         format!("{} {}{mark}", session.role.icon(), session.label)

@@ -1,5 +1,6 @@
 //! Host used by `spawn_subagent` to register a visible child session.
 
+use super::worktree::Isolation;
 use super::{AgentRole, ApprovalBridge, Session, SessionId};
 use crate::providers::AiProvider;
 use crate::session::AgentEvent;
@@ -18,6 +19,7 @@ pub struct PendingSubagent {
     pub role: AgentRole,
     pub parent_id: SessionId,
     pub parent_label: String,
+    pub isolation: Isolation,
     pub handle: Arc<tokio::sync::Mutex<Session>>,
     pub agent_rx: Receiver<AgentEvent>,
     pub agent_cancel: CancellationToken,

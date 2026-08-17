@@ -98,7 +98,7 @@ pub fn transcript_to_markdown(
                     "<details>\n<summary>Approval: {} ({status})</summary>\n\n",
                     handle.summary
                 ));
-                if let Some(patch) = &handle.patch {
+                for patch in &handle.files() {
                     out.push_str("```diff\n");
                     out.push_str(&redact_secrets(&patch.unified_diff));
                     if !out.ends_with('\n') {
@@ -208,7 +208,9 @@ mod tests {
                         unified_diff: "-old\n+new\n".into(),
                         status: crate::workspace::PatchStatus::Pending,
                     }),
+                    patches: Vec::new(),
                     command: None,
+                    source_label: None,
                 },
                 resolved: None,
             },

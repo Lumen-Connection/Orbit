@@ -5,7 +5,6 @@ use super::{Tool, ToolContext, ToolError, ToolOutcome, ToolRisk, truncate_output
 use crate::security::is_sensitive;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub struct GitStatus;
 pub struct GitCommit;
@@ -19,22 +18,7 @@ fn project_root(ctx: &ToolContext) -> Result<PathBuf, ToolError> {
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, ToolError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| ToolError::Message(format!("git failed to start: {e}")))?;
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.stderr.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    if !output.status.success() {
-        return Err(ToolError::Message(text));
-    }
-    Ok(text)
+    crate::workspace::git::git(root, args).map_err(ToolError::Message)
 }
 
 fn paths_of(args: &serde_json::Value) -> Result<Vec<String>, ToolError> {
@@ -194,6 +178,7 @@ mod tests {
     use crate::session::SessionId;
     use crate::tools::ToolContext;
     use crate::workspace::Project;
+    use std::process::Command;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;

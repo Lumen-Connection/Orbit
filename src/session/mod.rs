@@ -7,6 +7,7 @@ pub mod manager;
 pub mod message_ops;
 pub mod roles;
 pub mod subagent;
+pub mod worktree;
 
 pub use manager::SessionManager;
 
@@ -65,6 +66,7 @@ pub struct Session {
     pub limits: SessionLimits,
     pub context_summary: Option<String>,
     pub context_summary_upto: usize,
+    pub extra_system: Option<String>,
 }
 
 impl Session {
@@ -78,6 +80,7 @@ impl Session {
             limits: SessionLimits::default(),
             context_summary: None,
             context_summary_upto: 0,
+            extra_system: None,
         }
     }
 
@@ -95,10 +98,23 @@ pub struct ApprovalHandle {
     pub tool_name: String,
     pub summary: String,
     pub patch: Option<FilePatch>,
+    pub patches: Vec<FilePatch>,
     pub command: Option<ProposedCommand>,
+    pub source_label: Option<String>,
+}
+
+impl ApprovalHandle {
+    pub fn files(&self) -> Vec<FilePatch> {
+        if !self.patches.is_empty() {
+            self.patches.clone()
+        } else {
+            self.patch.clone().into_iter().collect()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     Delta(String),
     ToolStarted {
@@ -487,7 +503,9 @@ mod tests {
                 tool_name: "write_file".into(),
                 summary: "write_file(\"src/lib.rs\")".into(),
                 patch: None,
+                patches: Vec::new(),
                 command: None,
+                source_label: None,
             },
             resolved: None,
         }];
@@ -521,7 +539,9 @@ mod tests {
                 tool_name: "write_file".into(),
                 summary: "write_file(\"a.rs\")".into(),
                 patch: None,
+                patches: Vec::new(),
                 command: None,
+                source_label: None,
             },
             resolved: None,
         });

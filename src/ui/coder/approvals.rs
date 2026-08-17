@@ -32,12 +32,25 @@ pub fn render(
             );
             ui.add_space(4.0);
             ui.label(egui::RichText::new(&handle.summary).strong());
-            if let Some(patch) = &handle.patch {
+            if let Some(source) = &handle.source_label {
+                ui.label(
+                    egui::RichText::new(format!("from child {source}"))
+                        .small()
+                        .italics()
+                        .color(crate::ui::theme::tokens(ui).text_muted),
+                );
+            }
+            let files = handle.files();
+            for patch in &files {
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new(patch.relative_path.display().to_string())
-                        .monospace()
-                        .strong(),
+                    egui::RichText::new(format!(
+                        "{} · {:?}",
+                        patch.relative_path.display(),
+                        patch.status
+                    ))
+                    .monospace()
+                    .strong(),
                 );
                 widgets::diff::render(ui, &patch.original_content, &patch.proposed_content);
             }

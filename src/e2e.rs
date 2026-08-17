@@ -607,3 +607,471 @@ async fn budget_cap_stops_the_turn() {
         .unwrap();
     assert_eq!(result, TurnResult::BudgetExceeded);
 }
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_run(root: &std::path::Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn git_fixture() -> Option<(TempDir, Arc<Project>)> {
+    if !git_available() {
+        return None;
+    }
+    let tmp = TempDir::new().ok()?;
+    let root = tmp.path().join("proj");
+    std::fs::create_dir_all(root.join("src")).ok()?;
+    std::fs::write(root.join("src/lib.rs"), "fn authenticate() {}\n").ok()?;
+    std::fs::write(root.join("src/a.rs"), "fn a() {}\n").ok()?;
+    std::fs::write(root.join("src/b.rs"), "fn b() {}\n").ok()?;
+    std::fs::write(root.join("src/c.rs"), "fn c() {}\n").ok()?;
+    let _ = OrbitStore::open(&root);
+    if !git_run(&root, &["init"]) {
+        return None;
+    }
+    let _ = git_run(&root, &["config", "user.email", "orbit@test"]);
+    let _ = git_run(&root, &["config", "user.name", "orbit"]);
+    if !git_run(&root, &["add", "."]) || !git_run(&root, &["commit", "-m", "init"]) {
+        return None;
+    }
+    let project = Arc::new(Project::open(&root).ok()?);
+    Some((tmp, project))
+}
+
+fn subagent_host(
+    provider: Arc<dyn AiProvider>,
+    budget: f64,
+) -> Arc<crate::session::subagent::SubagentHost> {
+    Arc::new(crate::session::subagent::SubagentHost {
+        provider,
+        slots: Arc::new(tokio::sync::Semaphore::new(3)),
+        shared_spent: Arc::new(std::sync::Mutex::new(0.0)),
+        budget_usd: Some(budget),
+        pending: Arc::new(std::sync::Mutex::new(Vec::new())),
+        fraction: 0.25,
+    })
+}
+
+struct WorktreeParent {
+    turn: AtomicUsize,
+    child_turn: AtomicUsize,
+    child_started: Arc<std::sync::atomic::AtomicBool>,
+    hang_child: bool,
+}
+
+#[async_trait]
+impl AiProvider for WorktreeParent {
+    fn id(&self) -> &'static str {
+        "wt"
+    }
+    async fn list_models(&self) -> Result<Vec<AiModel>, ProviderError> {
+        Ok(Vec::new())
+    }
+    fn supports_tools(&self, _: &ModelId) -> bool {
+        true
+    }
+    async fn stream_chat(
+        &self,
+        request: ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, Result<ProviderEvent, ProviderError>>, ProviderError> {
+        if request.tools.iter().any(|t| t.name == "spawn_subagent") {
+            let n = self.turn.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                return Ok(Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("sp".into()),
+                        name: Some("spawn_subagent".into()),
+                        args_delta:
+                            r#"{"role":"coder","isolation":"worktree","task":"implement X"}"#.into(),
+                    }),
+                    Ok(ProviderEvent::Finished(FinishReason::ToolCalls)),
+                ])));
+            }
+            return Ok(Box::pin(stream::iter([
+                Ok(ProviderEvent::TextDelta("parent done".into())),
+                Ok(ProviderEvent::Finished(FinishReason::Stop)),
+            ])));
+        }
+        self.child_started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.hang_child {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+            }
+        }
+        let n = self.child_turn.fetch_add(1, Ordering::SeqCst);
+        let events = match n {
+            0 => vec![
+                Ok(ProviderEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("w1".into()),
+                    name: Some("write_file".into()),
+                    args_delta: r#"{"path":"src/a.rs","content":"fn a() { 1 }"}"#.into(),
+                }),
+                Ok(ProviderEvent::Finished(FinishReason::ToolCalls)),
+            ],
+            1 => vec![
+                Ok(ProviderEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("w2".into()),
+                    name: Some("write_file".into()),
+                    args_delta: r#"{"path":"src/b.rs","content":"fn b() { 2 }"}"#.into(),
+                }),
+                Ok(ProviderEvent::Finished(FinishReason::ToolCalls)),
+            ],
+            2 => vec![
+                Ok(ProviderEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("w3".into()),
+                    name: Some("write_file".into()),
+                    args_delta: r#"{"path":"src/c.rs","content":"fn c() { 3 }"}"#.into(),
+                }),
+                Ok(ProviderEvent::Finished(FinishReason::ToolCalls)),
+            ],
+            _ => vec![
+                Ok(ProviderEvent::TextDelta("child done".into())),
+                Ok(ProviderEvent::Finished(FinishReason::Stop)),
+            ],
+        };
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_subagent_writes_without_prompt_and_deny_keeps_parent_intact() {
+    let Some((_tmp, project)) = git_fixture() else {
+        return;
+    };
+    crate::session::worktree::prune(&project);
+    let child_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(WorktreeParent {
+        turn: AtomicUsize::new(0),
+        child_turn: AtomicUsize::new(0),
+        child_started,
+        hang_child: false,
+    });
+    let host = subagent_host(provider.clone(), 2.0);
+    let (tx, rx) = mpsc::channel();
+    let approvals = ApprovalBridge::new();
+    let mut turn = deps(
+        provider,
+        project.clone(),
+        None,
+        CancellationToken::new(),
+        Policy::default(),
+        tx,
+        approvals.clone(),
+        Some(2.0),
+        (None, None),
+        BudgetBridge::new(),
+    );
+    turn.subagents = Some(host);
+    let session = Arc::new(tokio::sync::Mutex::new(Session::new("coder", "wt")));
+    let task = tokio::spawn(run_turn(session, Some("implement X".into()), turn));
+
+    let saw_write_approval = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let merge_files = Arc::new(AtomicUsize::new(0));
+    let resolver = approvals.clone();
+    let saw_flag = saw_write_approval.clone();
+    let merge_count = merge_files.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            if let AgentEvent::ApprovalRequired(h) = event {
+                if h.tool_name == "write_file" || h.tool_name == "edit_file" {
+                    saw_flag.store(true, Ordering::SeqCst);
+                    resolver.resolve(h.id, ApprovalDecision::Denied);
+                    continue;
+                }
+                if !h.patches.is_empty() {
+                    merge_count.store(h.patches.len(), Ordering::SeqCst);
+                    resolver.resolve(h.id, ApprovalDecision::Denied);
+                    continue;
+                }
+                resolver.resolve(h.id, ApprovalDecision::Approved);
+            }
+        }
+    });
+
+    let result = tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .expect("timeout")
+        .unwrap();
+    crate::session::worktree::prune(&project);
+    assert_eq!(result, TurnResult::Completed);
+    assert!(
+        !saw_write_approval.load(Ordering::SeqCst),
+        "child writes must not prompt"
+    );
+    assert_eq!(
+        merge_files.load(Ordering::SeqCst),
+        3,
+        "expected one merge of 3 files"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.canonical_root.join("src/a.rs")).unwrap(),
+        "fn a() {}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.canonical_root.join("src/b.rs")).unwrap(),
+        "fn b() {}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.canonical_root.join("src/c.rs")).unwrap(),
+        "fn c() {}\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_subagent_conflict_when_parent_edits_same_file() {
+    let Some((_tmp, project)) = git_fixture() else {
+        return;
+    };
+    crate::session::worktree::prune(&project);
+    let child_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(WorktreeParent {
+        turn: AtomicUsize::new(0),
+        child_turn: AtomicUsize::new(0),
+        child_started: child_started.clone(),
+        hang_child: false,
+    });
+    let host = subagent_host(provider.clone(), 2.0);
+    let (tx, rx) = mpsc::channel();
+    let approvals = ApprovalBridge::new();
+    let mut turn = deps(
+        provider,
+        project.clone(),
+        None,
+        CancellationToken::new(),
+        Policy::default(),
+        tx,
+        approvals.clone(),
+        Some(2.0),
+        (None, None),
+        BudgetBridge::new(),
+    );
+    turn.subagents = Some(host);
+    let session = Arc::new(tokio::sync::Mutex::new(Session::new("coder", "wt")));
+    let task = tokio::spawn(run_turn(session, Some("implement X".into()), turn));
+
+    let parent_root = project.canonical_root.clone();
+    let started = child_started;
+    let conflicted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resolver = approvals.clone();
+    let conflict_flag = conflicted.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            if let AgentEvent::ApprovalRequired(h) = event {
+                if h.patches.is_empty() {
+                    resolver.resolve(h.id, ApprovalDecision::Approved);
+                    let start = std::time::Instant::now();
+                    while !started.load(std::sync::atomic::Ordering::SeqCst)
+                        && start.elapsed() < Duration::from_secs(5)
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    let _ = std::fs::write(parent_root.join("src/a.rs"), "fn parent() {}\n");
+                } else {
+                    conflict_flag.store(
+                        h.patches
+                            .iter()
+                            .any(|p| matches!(p.status, crate::workspace::PatchStatus::Conflicted)),
+                        Ordering::SeqCst,
+                    );
+                    resolver.resolve(h.id, ApprovalDecision::Denied);
+                }
+            }
+        }
+    });
+
+    let result = tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .expect("timeout")
+        .unwrap();
+    crate::session::worktree::prune(&project);
+    assert_eq!(result, TurnResult::Completed);
+    assert!(
+        conflicted.load(Ordering::SeqCst),
+        "parent+child edit of the same file must conflict"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_parent_removes_the_worktree() {
+    let Some((_tmp, project)) = git_fixture() else {
+        return;
+    };
+    crate::session::worktree::prune(&project);
+    let child_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(WorktreeParent {
+        turn: AtomicUsize::new(0),
+        child_turn: AtomicUsize::new(0),
+        child_started: child_started.clone(),
+        hang_child: true,
+    });
+    let host = subagent_host(provider.clone(), 2.0);
+    let (tx, rx) = mpsc::channel();
+    let approvals = ApprovalBridge::new();
+    let cancel = CancellationToken::new();
+    let mut turn = deps(
+        provider,
+        project.clone(),
+        None,
+        cancel.clone(),
+        Policy::default(),
+        tx,
+        approvals.clone(),
+        Some(2.0),
+        (None, None),
+        BudgetBridge::new(),
+    );
+    turn.subagents = Some(host);
+    let session = Arc::new(tokio::sync::Mutex::new(Session::new("coder", "wt")));
+    let task = tokio::spawn(run_turn(session, Some("implement X".into()), turn));
+    let resolver = approvals.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            if let AgentEvent::ApprovalRequired(h) = event {
+                resolver.resolve(h.id, ApprovalDecision::Approved);
+            }
+        }
+    });
+    let start = std::time::Instant::now();
+    while !child_started.load(std::sync::atomic::Ordering::SeqCst)
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+    let list = crate::workspace::git::git(&project.canonical_root, &["worktree", "list"])
+        .unwrap_or_default();
+    crate::session::worktree::prune(&project);
+    assert!(
+        !list.contains(&project.id) && list.lines().count() <= 1,
+        "worktree list should be clean after cancel: {list}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn isolation_none_with_coder_is_refused() {
+    let (_tmp, project, _) = fixture();
+    let (tx, rx) = mpsc::channel();
+    let approvals = ApprovalBridge::new();
+    let call = ToolCall {
+        id: "sp".into(),
+        name: "spawn_subagent".into(),
+        arguments: serde_json::json!({
+            "role": "coder",
+            "isolation": "none",
+            "task": "write it"
+        }),
+    };
+    let provider = Arc::new(Script {
+        turn: AtomicUsize::new(99),
+    });
+    let host = subagent_host(provider.clone(), 2.0);
+    let mut turn = deps(
+        provider,
+        project,
+        None,
+        CancellationToken::new(),
+        Policy::default(),
+        tx,
+        approvals.clone(),
+        Some(2.0),
+        (None, None),
+        BudgetBridge::new(),
+    );
+    turn.subagents = Some(host);
+    let task = tokio::spawn(async move { dispatch_tool(&call, &turn).await });
+    let resolver = approvals;
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            if let AgentEvent::ApprovalRequired(h) = event {
+                resolver.resolve(h.id, ApprovalDecision::Approved);
+            }
+        }
+    });
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("timeout")
+        .unwrap();
+    match result {
+        ChatMessage::ToolResult {
+            content, is_error, ..
+        } => {
+            assert!(is_error);
+            assert!(content.contains("worktree"), "{content}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_isolation_refuses_a_project_without_git() {
+    let (_tmp, project, _) = fixture();
+    let (tx, rx) = mpsc::channel();
+    let approvals = ApprovalBridge::new();
+    let call = ToolCall {
+        id: "sp".into(),
+        name: "spawn_subagent".into(),
+        arguments: serde_json::json!({
+            "role": "coder",
+            "isolation": "worktree",
+            "task": "write it"
+        }),
+    };
+    let provider = Arc::new(Script {
+        turn: AtomicUsize::new(99),
+    });
+    let host = subagent_host(provider.clone(), 2.0);
+    let mut turn = deps(
+        provider,
+        project,
+        None,
+        CancellationToken::new(),
+        Policy::default(),
+        tx,
+        approvals.clone(),
+        Some(2.0),
+        (None, None),
+        BudgetBridge::new(),
+    );
+    turn.subagents = Some(host);
+    let task = tokio::spawn(async move { dispatch_tool(&call, &turn).await });
+    let resolver = approvals;
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            if let AgentEvent::ApprovalRequired(h) = event {
+                resolver.resolve(h.id, ApprovalDecision::Approved);
+            }
+        }
+    });
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("timeout")
+        .unwrap();
+    match result {
+        ChatMessage::ToolResult {
+            content, is_error, ..
+        } => {
+            assert!(is_error);
+            assert!(content.contains("git"), "{content}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}

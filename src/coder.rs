@@ -449,6 +449,9 @@ impl App {
             cancel.cancel();
         }
         state.coder.sessions.shutdown();
+        if let Some(project) = state.coder.project.as_ref() {
+            crate::session::worktree::prune(project);
+        }
         state.coder.project = None;
         state.coder.store = None;
         state.coder.pending_patches.clear();
@@ -1408,10 +1411,14 @@ impl App {
                 return;
             };
             match state.coder.sessions.resolve_approval(id, decision) {
-                Some((false, Some(mut patch), sid)) if decision == ApprovalDecision::Approved => {
+                Some((false, patches, sid))
+                    if decision == ApprovalDecision::Approved && !patches.is_empty() =>
+                {
                     if let Some(project) = state.coder.project.clone() {
-                        let _ = apply_patch(&project.canonical_root, &mut patch);
-                        persist_patch_db(&db, &rt, &project.id, &sid, &patch);
+                        for mut patch in patches {
+                            let _ = apply_patch(&project.canonical_root, &mut patch);
+                            persist_patch_db(&db, &rt, &project.id, &sid, &patch);
+                        }
                     }
                     state.coder.selected.clone()
                 }
@@ -2011,6 +2018,7 @@ fn start_scan(
     let root = project.canonical_root.clone();
     let token = cancel.clone();
     rt.spawn_blocking(move || scan_project(root, tx, token));
+    crate::session::worktree::prune(&project);
     state.coder.project = Some(project);
     state.coder.recent = recent;
     state.coder.projects = projects;
@@ -2343,7 +2351,9 @@ pub(crate) fn transcript_from_messages(
                 tool_name: "write_file".into(),
                 summary: format!("write_file(\"{}\")", patch.relative_path.display()),
                 patch: Some(patch.clone()),
+                patches: Vec::new(),
                 command: None,
+                source_label: None,
             },
             resolved: None,
         });

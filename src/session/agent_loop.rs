@@ -101,13 +101,14 @@ pub async fn run_turn(
             return TurnResult::Cancelled;
         }
         iterations += 1;
-        let (model, messages, max_iter, label) = {
+        let (model, messages, max_iter, label, extra_system) = {
             let session = session.lock().await;
             (
                 session.model.clone(),
                 session.messages.clone(),
                 session.limits.max_iterations,
                 session.label.clone(),
+                session.extra_system.clone(),
             )
         };
         tracing::debug!(
@@ -131,7 +132,7 @@ pub async fn run_turn(
             }
         }
 
-        let system = compose_system(&deps, &label);
+        let system = compose_system(&deps, extra_system.as_deref());
         let system_cache_chars = system_cache_prefix_chars(&deps);
         let messages = pack_messages(&session, &deps, &system, messages).await;
         let request = ChatRequest {
@@ -675,8 +676,12 @@ pub fn compose_coder_system(
     system
 }
 
-fn compose_system(deps: &TurnDeps, _label: &str) -> String {
+fn compose_system(deps: &TurnDeps, extra_system: Option<&str>) -> String {
     let mut system = system_prompt_for(deps.session_role);
+    if let Some(extra) = extra_system.filter(|s| !s.trim().is_empty()) {
+        system.push_str("\n\n");
+        system.push_str(extra);
+    }
     if let Some(store) = &deps.store
         && let Ok(mut store) = store.lock()
     {
@@ -932,13 +937,32 @@ async fn request_approval(
         return ApprovalDecision::Approved;
     }
 
-    let handle = ApprovalHandle {
-        id: ApprovalId::new(),
-        tool_name: tool_name.into(),
-        summary,
-        patch,
-        command,
-    };
+    request_approval_handle(
+        deps,
+        ApprovalHandle {
+            id: ApprovalId::new(),
+            tool_name: tool_name.into(),
+            summary,
+            patch,
+            patches: Vec::new(),
+            command,
+            source_label: None,
+        },
+        risk,
+        sensitive,
+    )
+    .await
+}
+
+async fn request_approval_handle(
+    deps: &TurnDeps,
+    handle: ApprovalHandle,
+    risk: crate::tools::ToolRisk,
+    sensitive: bool,
+) -> ApprovalDecision {
+    if handle.command.is_none() && !deps.policy.needs_approval(risk, sensitive) {
+        return ApprovalDecision::Approved;
+    }
     // Register the oneshot before emitting so a fast UI/test resolve cannot miss it.
     let rx = deps.approvals.register(handle.id);
     let _ = deps
@@ -973,8 +997,11 @@ pub fn summarize(name: &str, args: &serde_json::Value) -> String {
         "add_finding" => format!("add_finding(\"{}\")", pick("description")),
         "update_task" => format!("update_task(\"{}\")", pick("id")),
         "spawn_subagent" => format!(
-            "spawn_subagent({} · {} · {})",
+            "spawn_subagent({} · {} · {} · {})",
             pick("role"),
+            args.get("isolation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none"),
             pick("model"),
             pick("task")
         ),
@@ -989,16 +1016,106 @@ async fn dispatch_subagent(
     summary: &str,
 ) -> ChatMessage {
     let slice = deps.subagents.as_ref().map(|h| h.slice()).unwrap_or(0.0);
-    let approval_summary = format!("{summary} · budget ${slice:.2}");
+    let isolation = crate::session::worktree::Isolation::parse(
+        call.arguments.get("isolation").and_then(|v| v.as_str()),
+    )
+    .unwrap_or(crate::session::worktree::Isolation::None);
+    let dirty = crate::workspace::git::is_dirty(&deps.project.canonical_root);
+    let mut approval_summary = format!("{summary} · budget ${slice:.2}");
+    if isolation == crate::session::worktree::Isolation::Worktree && dirty {
+        approval_summary.push_str(
+            " · parent working tree is dirty; the child starts from HEAD and will not see uncommitted edits",
+        );
+    }
     let decision = request_approval(deps, &call.name, approval_summary, None, None).await;
     if decision != ApprovalDecision::Approved {
         return finish_tool(deps, call, "The user denied this subagent.".into(), true);
     }
-    let mut ctx = bind_ctx(deps, Arc::new(Mutex::new(Vec::new())), false);
+    let patches = Arc::new(Mutex::new(Vec::new()));
+    let mut ctx = bind_ctx(deps, patches.clone(), false);
     ctx.allow_execute = true;
-    match tool.execute(call.arguments.clone(), &ctx).await {
-        Ok(out) => finish_tool(deps, call, out.content, false),
-        Err(e) => finish_tool(deps, call, e.to_string(), true),
+    let outcome = match tool.execute(call.arguments.clone(), &ctx).await {
+        Ok(out) => out,
+        Err(e) => return finish_tool(deps, call, e.to_string(), true),
+    };
+    let merge = patches.lock().ok().map(|p| p.clone()).unwrap_or_default();
+    if merge.is_empty() {
+        return finish_tool(deps, call, outcome.content, false);
+    }
+    let source = call
+        .arguments
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or("subagent");
+    let merge_summary = format!(
+        "Apply {} file{} from sub: {source}",
+        merge.len(),
+        if merge.len() == 1 { "" } else { "s" }
+    );
+    let first = merge.first().cloned();
+    let decision = request_approval_handle(
+        deps,
+        ApprovalHandle {
+            id: ApprovalId::new(),
+            tool_name: call.name.clone(),
+            summary: merge_summary,
+            patch: first,
+            patches: merge.clone(),
+            command: None,
+            source_label: Some(format!("sub: {source}")),
+        },
+        ToolRisk::Mutating,
+        false,
+    )
+    .await;
+    match decision {
+        ApprovalDecision::Approved => {
+            let mut applied = 0u32;
+            let mut conflicted = 0u32;
+            for mut patch in merge {
+                match apply_patch(&deps.project.canonical_root, &mut patch) {
+                    Ok(()) if matches!(patch.status, crate::workspace::PatchStatus::Applied) => {
+                        record_touch(deps, &patch.relative_path);
+                        persist_patch(deps, &patch);
+                        applied += 1;
+                    }
+                    Ok(()) if matches!(patch.status, crate::workspace::PatchStatus::Conflicted) => {
+                        persist_patch(deps, &patch);
+                        conflicted += 1;
+                    }
+                    Ok(()) => persist_patch(deps, &patch),
+                    Err(e) => {
+                        return finish_tool(
+                            deps,
+                            call,
+                            format!("{}\n\nmerge failed: {e}", outcome.content),
+                            true,
+                        );
+                    }
+                }
+            }
+            let status = if conflicted > 0 {
+                format!("\n\nMerged {applied} file(s); {conflicted} conflicted.")
+            } else {
+                format!("\n\nMerged {applied} file(s) from the worktree.")
+            };
+            finish_tool(deps, call, format!("{}{status}", outcome.content), false)
+        }
+        ApprovalDecision::Denied => {
+            for mut patch in merge {
+                patch.status = crate::workspace::PatchStatus::Rejected;
+                persist_patch(deps, &patch);
+            }
+            finish_tool(
+                deps,
+                call,
+                format!(
+                    "{}\n\nThe user denied the worktree merge. The project tree is unchanged.",
+                    outcome.content
+                ),
+                true,
+            )
+        }
     }
 }
 
