@@ -371,15 +371,29 @@ mod tests {
         // A build emits interleaved stdout/stderr; the report must reflect the
         // actual arrival order, not a race between two pump tasks.
         let (_tmp, ctx) = fixture();
-        let (program, args) = if cfg!(windows) {
+        // Pause between writes so the parent can observe each pipe before the
+        // next line is emitted. Without that, both pipes are readable at once
+        // and select! order is not the script order.
+        let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
             (
-                "cmd",
-                vec!["/c".into(), "echo OUT1 & echo ERR1 1>&2 & echo OUT2".into()],
+                "powershell",
+                vec![
+                    "-NoProfile",
+                    "-Command",
+                    "[Console]::Out.WriteLine('OUT1'); [Console]::Out.Flush(); \
+                     Start-Sleep -Milliseconds 200; \
+                     [Console]::Error.WriteLine('ERR1'); [Console]::Error.Flush(); \
+                     Start-Sleep -Milliseconds 200; \
+                     [Console]::Out.WriteLine('OUT2')",
+                ],
             )
         } else {
             (
                 "sh",
-                vec!["-c".into(), "echo OUT1; echo ERR1 >&2; echo OUT2".into()],
+                vec![
+                    "-c",
+                    "echo OUT1; sleep 0.2; echo ERR1 >&2; sleep 0.2; echo OUT2",
+                ],
             )
         };
         let out = RunCommand
