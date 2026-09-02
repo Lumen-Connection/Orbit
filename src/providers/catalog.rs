@@ -106,14 +106,14 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Extreme thinking model",
             },
             ModelEntry {
-                id: "qwen/qwen3.7-plus",
-                name: "Qwen3.7-Plus",
-                descriptor: "Adaptive reasoning model",
+                id: "qwen/qwen3.8-27b",
+                name: "Qwen3.8-Flash",
+                descriptor: "Dense, quick model",
             },
             ModelEntry {
-                id: "qwen/qwen3.7-flash",
-                name: "Qwen3.7-Flash",
-                descriptor: "Cheap, quick model",
+                id: "qwen/qwen3.7-plus",
+                name: "Qwen3.7-Plus",
+                descriptor: "Previous generation adaptive model",
             },
         ],
     },
@@ -141,19 +141,19 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "Z.ai",
         models: &[
             ModelEntry {
-                id: "z-ai/glm-5.2",
-                name: "GLM-5.2",
+                id: "z-ai/glm-5.3",
+                name: "GLM-5.3",
                 descriptor: "Z.ai's latest reasoning model",
             },
             ModelEntry {
-                id: "z-ai/glm-5.1",
-                name: "GLM-5.1",
-                descriptor: "Z.ai's previous reasoning model",
+                id: "z-ai/glm-5.3-flash",
+                name: "GLM-5.3 Flash",
+                descriptor: "Z.ai's latest quick reasoning model",
             },
             ModelEntry {
-                id: "z-ai/glm-5v-turbo",
-                name: "GLM-5V-Turbo",
-                descriptor: "Z.ai's latest multimodal model",
+                id: "z-ai/glm-5.2",
+                name: "GLM-5.2",
+                descriptor: "Z.ai's previous reasoning model",
             },
         ],
     },
@@ -259,7 +259,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
     },
 ];
 
-pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+pub const DEFAULT_MODEL: &str = "z-ai/glm-5.3-flash";
 
 /// Class used by N3.10 Auto model selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
