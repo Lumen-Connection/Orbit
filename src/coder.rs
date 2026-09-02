@@ -2551,7 +2551,7 @@ fn highlight_source(src: &str, extension: &str) -> egui::text::LayoutJob {
 
 #[cfg(test)]
 mod tests {
-    use super::{TERMINAL_LINE_LIMIT, TerminalState};
+    use super::{TERMINAL_LINE_LIMIT, TerminalState, highlight_source};
     use crate::tools::shell::TerminalEvent;
     use tokio_util::sync::CancellationToken;
 
@@ -2572,5 +2572,16 @@ mod tests {
                 .contains(&format!("line {}", TERMINAL_LINE_LIMIT + 79))
         );
         assert!(!term.view().contains("line 0\n"));
+    }
+
+    #[test]
+    fn syntax_highlighting_supports_defaults_and_plain_text_fallback() {
+        let rust = highlight_source("fn main() {}\n", "rs");
+        assert_eq!(rust.text, "fn main() {}\n");
+        assert!(!rust.sections.is_empty());
+
+        let unknown = highlight_source("plain text\n", "not-a-language");
+        assert_eq!(unknown.text, "plain text\n");
+        assert!(!unknown.sections.is_empty());
     }
 }

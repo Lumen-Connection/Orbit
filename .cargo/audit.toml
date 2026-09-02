@@ -2,4 +2,11 @@
 # wayland-scanner (eframe / Wayland codegen) pins quick-xml 0.39.
 # These advisories are XML parse DoS in a *build-time* crate, not in Orbit's
 # runtime request path. Remove when eframe moves wayland-scanner forward.
-ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
+# Syntect's bundled syntax/theme assets require bincode 1.x for deserialization;
+# there is no patched release, and Orbit does not deserialize untrusted input
+# with it. Remove this exception when Syntect modernizes that dependency.
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2025-0141",
+]
