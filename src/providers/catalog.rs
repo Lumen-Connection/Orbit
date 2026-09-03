@@ -46,9 +46,9 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Deep thinking",
             },
             ModelEntry {
-                id: "google/gemini-3.7-flash",
-                name: "Gemini 3.7 Flash",
-                descriptor: "Balanced model",
+                id: "google/gemini-3.8-flash",
+                name: "Gemini 3.8 Flash",
+                descriptor: "Latest Google model",
             },
             ModelEntry {
                 id: "google/gemini-3.5-flash-lite",
@@ -61,8 +61,8 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "Anthropic",
         models: &[
             ModelEntry {
-                id: "anthropic/claude-fable-5",
-                name: "Claude Fable 5",
+                id: "anthropic/claude-fable-5.1",
+                name: "Claude Fable 5.1",
                 descriptor: "Extreme cost Mythos-level reasoning model",
             },
             ModelEntry {
@@ -98,6 +98,26 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         ],
     },
     ModelGroup {
+        provider: "Meta",
+        models: &[
+            ModelEntry {
+                id: "meta/muse-spark-1.3",
+                name: "Muse Spark 1.3",
+                descriptor: "Meta's latest advanced model",
+            },
+            ModelEntry {
+                id: "meta/muse-spark-1.2",
+                name: "Muse Spark 1.2",
+                descriptor: "Meta's previous advanced model",
+            },
+            ModelEntry {
+                id: "meta/muse-glimmer-30b",
+                name: "Muse Glimmer",
+                descriptor: "Meta's small reasoning model",
+            },
+        ]
+    },
+    ModelGroup {
         provider: "Alibaba",
         models: &[
             ModelEntry {
@@ -106,7 +126,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "Extreme thinking model",
             },
             ModelEntry {
-                id: "qwen/qwen3.8-27b",
+                id: "qwen/qwen3.8-flash",
                 name: "Qwen3.8-Flash",
                 descriptor: "Dense, quick model",
             },
