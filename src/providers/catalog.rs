@@ -115,7 +115,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 name: "Muse Glimmer",
                 descriptor: "Meta's small reasoning model",
             },
-        ]
+        ],
     },
     ModelGroup {
         provider: "Alibaba",
