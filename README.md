@@ -27,7 +27,7 @@ versionable Project Context.
 
 ### From a release
 
-Download the Windows installer (or potable version) or the Linux AppImage from
+Download the Windows installer (or portable version) or the Linux AppImage from
 [Releases](https://github.com/Lumen-Connection/Orbit/releases).
 
 ### Building
