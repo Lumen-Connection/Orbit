@@ -9,6 +9,7 @@ use crate::storage::{self, AppSettings, Db};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
@@ -310,9 +311,30 @@ pub enum StreamUiEvent {
 }
 
 pub struct PendingResponse {
-    pub chat_id: Uuid,
+    pub assistant_index: usize,
     pub rx: Receiver<StreamUiEvent>,
     pub cancel: CancellationToken,
+}
+
+impl Drop for PendingResponse {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+#[derive(Default)]
+pub struct ChatUiState {
+    pub input: String,
+    pub draft_images: Vec<crate::providers::ImageAttachment>,
+    pub retry_hint: Option<String>,
+    pub editing: Option<MessageEdit>,
+    pub auth_rejected: bool,
+    pub generation: u64,
+}
+
+pub enum AuthRetryTarget {
+    Chat { chat_id: Uuid, generation: u64 },
+    Coder(crate::session::SessionId),
 }
 
 pub struct MainState {
@@ -322,8 +344,8 @@ pub struct MainState {
     pub active_chat_id: Option<Uuid>,
     pub temp_chat: Option<Chat>,
     pub temporary_mode: bool,
-    pub input: String,
-    pub pending: Option<PendingResponse>,
+    pub chat_ui: HashMap<Uuid, ChatUiState>,
+    pub pending: HashMap<Uuid, PendingResponse>,
     pub focus_input_next_frame: bool,
     pub confirm_eject: bool,
     pub catalog: ModelCatalog,
@@ -336,15 +358,14 @@ pub struct MainState {
     pub credential: CredentialStatus,
     pub banner_key_input: String,
     pub banner_show_key: bool,
-    pub retry_after_auth: bool,
-    pub retry_hint: Option<String>,
+    pub retry_after_auth: Option<AuthRetryTarget>,
+    // Coder Mode attachments; Chat drafts live in chat_ui.
     pub draft_images: Vec<crate::providers::ImageAttachment>,
     pub lightbox: Option<crate::providers::ImageAttachment>,
     pub chat_search: String,
     pub focus_search_next_frame: bool,
     pub renaming_chat: Option<(Uuid, String)>,
     pub pending_confirm: Option<PendingConfirm>,
-    pub editing_chat: Option<MessageEdit>,
     pub editing_coder: Option<MessageEdit>,
 }
 
@@ -357,10 +378,12 @@ pub struct MessageEdit {
 #[derive(Debug, Clone)]
 pub enum PendingConfirm {
     DeleteChat {
+        chat_id: Uuid,
         index: usize,
         count: usize,
     },
     EditResendChat {
+        chat_id: Uuid,
         index: usize,
         text: String,
         count: usize,
@@ -377,6 +400,86 @@ pub enum PendingConfirm {
 }
 
 impl MainState {
+    pub fn chat(&self, id: Uuid) -> Option<&Chat> {
+        self.chats
+            .iter()
+            .find(|c| c.id == id)
+            .or_else(|| self.temp_chat.as_ref().filter(|c| c.id == id))
+    }
+
+    pub fn chat_mut(&mut self, id: Uuid) -> Option<&mut Chat> {
+        self.chats
+            .iter_mut()
+            .find(|c| c.id == id)
+            .or_else(|| self.temp_chat.as_mut().filter(|c| c.id == id))
+    }
+
+    pub fn active_chat_pending(&self) -> bool {
+        self.active_chat()
+            .is_some_and(|c| self.pending.contains_key(&c.id))
+    }
+
+    pub fn active_chat_ui(&self) -> Option<&ChatUiState> {
+        self.chat_ui.get(&self.active_chat()?.id)
+    }
+
+    pub fn active_chat_ui_mut(&mut self) -> Option<&mut ChatUiState> {
+        let id = self.active_chat()?.id;
+        Some(self.chat_ui.entry(id).or_default())
+    }
+
+    fn auth_retry_target(&self) -> Option<AuthRetryTarget> {
+        let for_chat = |id: Uuid| {
+            self.chat_ui
+                .get(&id)
+                .filter(|s| s.auth_rejected)
+                .map(|s| AuthRetryTarget::Chat {
+                    chat_id: id,
+                    generation: s.generation,
+                })
+        };
+        match self.mode {
+            AppMode::Chat => {
+                if let Some(target) = self.active_chat().and_then(|c| for_chat(c.id)) {
+                    return Some(target);
+                }
+            }
+            AppMode::Coder => {
+                if let Some(live) = self.coder.sessions.active()
+                    && live.transcript.last().is_some_and(|m| matches!(m, crate::session::TranscriptItem::Assistant(text) if text == AUTH_REJECTED_NOTICE))
+                {
+                    return Some(AuthRetryTarget::Coder(live.id.clone()));
+                }
+            }
+        }
+        // The global banner can describe a background chat. Retry it only when
+        // there is one unambiguous origin; otherwise just repair the credential.
+        let mut failed = self
+            .chat_ui
+            .iter()
+            .filter(|(id, s)| s.auth_rejected && self.chat(**id).is_some());
+        let (&id, _) = failed.next()?;
+        if failed.next().is_some() {
+            return None;
+        }
+        for_chat(id)
+    }
+
+    fn dispose_chat(&mut self, id: Uuid) {
+        self.pending.remove(&id); // Drop cancels the worker before its receiver disappears.
+        self.chat_ui.remove(&id);
+        if matches!(self.retry_after_auth, Some(AuthRetryTarget::Chat { chat_id, .. }) if chat_id == id)
+        {
+            self.retry_after_auth = None;
+        }
+        if matches!(self.pending_confirm,
+            Some(PendingConfirm::DeleteChat { chat_id, .. } | PendingConfirm::EditResendChat { chat_id, .. }) if chat_id == id)
+        {
+            self.pending_confirm = None;
+        }
+        self.lightbox = None;
+    }
+
     pub fn active_chat_mut(&mut self) -> Option<&mut Chat> {
         if self.temporary_mode {
             self.temp_chat.as_mut()
@@ -400,6 +503,8 @@ pub struct App {
     pub screen: Screen,
     pub rt: Arc<Runtime>,
     pub db: Arc<Db>,
+    #[cfg(test)]
+    chat_history_path: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -426,7 +531,13 @@ impl App {
             }),
         };
 
-        Ok(Self { screen, rt, db })
+        Ok(Self {
+            screen,
+            rt,
+            db,
+            #[cfg(test)]
+            chat_history_path: None,
+        })
     }
 
     fn build_main_state(api_key: String, rt: &Runtime) -> anyhow::Result<MainState> {
@@ -464,8 +575,8 @@ impl App {
             active_chat_id,
             temp_chat: None,
             temporary_mode: false,
-            input: String::new(),
-            pending: None,
+            chat_ui: HashMap::new(),
+            pending: HashMap::new(),
             focus_input_next_frame: false,
             confirm_eject: false,
             catalog,
@@ -478,15 +589,13 @@ impl App {
             credential: CredentialStatus::from_key(Some(&api_key)),
             banner_key_input: String::new(),
             banner_show_key: false,
-            retry_after_auth: false,
-            retry_hint: None,
+            retry_after_auth: None,
             draft_images: Vec::new(),
             lightbox: None,
             chat_search: String::new(),
             focus_search_next_frame: false,
             renaming_chat: None,
             pending_confirm: None,
-            editing_chat: None,
             editing_coder: None,
         })
     }
@@ -584,24 +693,30 @@ impl App {
         };
         let model = state.settings.chat_default_model.clone();
         if state.temporary_mode {
+            if let Some(old) = state.temp_chat.take() {
+                state.dispose_chat(old.id);
+            }
             state.temp_chat = Some(Chat::new(model));
+            state.focus_input_next_frame = true;
             return;
         }
         let chat = Chat::new(model);
         state.active_chat_id = Some(chat.id);
         state.chats.insert(0, chat);
-        let _ = storage::save_chats(&state.chats);
         state.focus_input_next_frame = true;
+        state.lightbox = None;
+        self.persist_open_chats();
     }
 
     pub fn select_chat(&mut self, id: Uuid) {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if state.temporary_mode {
+        if state.temporary_mode || !state.chats.iter().any(|c| c.id == id) {
             return;
         }
         state.active_chat_id = Some(id);
+        state.lightbox = None;
         state.focus_input_next_frame = true;
     }
 
@@ -609,6 +724,7 @@ impl App {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
+        state.dispose_chat(id);
         state.chats.retain(|c| c.id != id);
         if state.active_chat_id == Some(id) {
             state.active_chat_id = state.chats.first().map(|c| c.id);
@@ -618,7 +734,7 @@ impl App {
             state.active_chat_id = Some(chat.id);
             state.chats.push(chat);
         }
-        let _ = storage::save_chats(&state.chats);
+        self.persist_open_chats();
     }
 
     pub fn set_temporary_mode(&mut self, on: bool) {
@@ -632,8 +748,11 @@ impl App {
         if on {
             state.temp_chat = Some(Chat::new(state.settings.chat_default_model.clone()));
         } else {
-            state.temp_chat = None;
+            if let Some(old) = state.temp_chat.take() {
+                state.dispose_chat(old.id);
+            }
         }
+        state.lightbox = None;
         state.focus_input_next_frame = true;
     }
 
@@ -641,29 +760,39 @@ impl App {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if state.pending.is_some() {
+        if state.active_chat_pending() {
             return;
         }
-        let text = state.input.trim().to_string();
-        if text.is_empty() && state.draft_images.is_empty() {
+        let Some(chat) = state.active_chat() else {
+            return;
+        };
+        let chat_id = chat.id;
+        let preview_model = chat.model.clone();
+        let draft = state.chat_ui.entry(chat_id).or_default();
+        let text = draft.input.trim().to_string();
+        if text.is_empty() && draft.draft_images.is_empty() {
             return;
         }
-        let preview_model = state
-            .active_chat()
-            .map(|c| c.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        if !state.draft_images.is_empty()
+        if !draft.draft_images.is_empty()
             && !state
                 .catalog
                 .find(&preview_model)
                 .is_some_and(|m| m.supports_vision)
         {
-            state.retry_hint = Some(
+            draft.retry_hint = Some(
                 "This model is text-only. Switch to a vision model or remove the image.".into(),
             );
             return;
         }
-        let images = std::mem::take(&mut state.draft_images);
+        if resolve_provider(state, &preview_model).is_none() {
+            state.chat_ui.entry(chat_id).or_default().retry_hint =
+                Some("Configure a provider for this model before sending.".into());
+            return;
+        }
+        let draft = state.chat_ui.entry(chat_id).or_default();
+        let images = std::mem::take(&mut draft.draft_images);
+        draft.input.clear();
+        draft.editing = None;
         let Some(chat) = state.active_chat_mut() else {
             return;
         };
@@ -680,15 +809,23 @@ impl App {
                 chat.title.push('…');
             }
         }
-        state.input.clear();
-        self.start_chat_stream();
+        self.start_chat_stream(chat_id);
     }
 
     pub fn regenerate_chat(&mut self) {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if state.pending.is_some() {
+        if state.active_chat_pending() {
+            return;
+        }
+        let Some(chat) = state.active_chat() else {
+            return;
+        };
+        let chat_id = chat.id;
+        if resolve_provider(state, &chat.model).is_none() {
+            state.chat_ui.entry(chat_id).or_default().retry_hint =
+                Some("Configure a provider for this model before retrying.".into());
             return;
         }
         let Some(chat) = state.active_chat_mut() else {
@@ -698,17 +835,42 @@ impl App {
             return;
         }
         self.invalidate_chat_summary();
-        self.start_chat_stream();
+        self.start_chat_stream(chat_id);
     }
 
     pub fn edit_resend_chat(&mut self, index: usize, text: String) {
+        let Screen::Main(state) = &self.screen else {
+            return;
+        };
+        let Some(chat) = state.active_chat() else {
+            return;
+        };
+        self.edit_resend_chat_for(chat.id, index, text);
+    }
+
+    pub fn edit_resend_chat_for(&mut self, chat_id: Uuid, index: usize, text: String) {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if state.pending.is_some() {
+        if state.pending.contains_key(&chat_id) {
             return;
         }
-        let Some(chat) = state.active_chat_mut() else {
+        let Some(chat) = state.chat(chat_id) else {
+            return;
+        };
+        if !chat
+            .messages
+            .get(index)
+            .is_some_and(|m| matches!(m.role, Role::User))
+        {
+            return;
+        }
+        if resolve_provider(state, &chat.model).is_none() {
+            state.chat_ui.entry(chat_id).or_default().retry_hint =
+                Some("Configure a provider for this model before retrying.".into());
+            return;
+        }
+        let Some(chat) = state.chat_mut(chat_id) else {
             return;
         };
         crate::session::message_ops::truncate_chat_from(&mut chat.messages, index, text);
@@ -716,19 +878,29 @@ impl App {
             chat.context_summary = None;
             chat.context_summary_upto = 0;
         }
-        state.editing_chat = None;
+        state.chat_ui.entry(chat_id).or_default().editing = None;
         state.pending_confirm = None;
-        self.start_chat_stream();
+        self.start_chat_stream(chat_id);
     }
 
     pub fn delete_chat_pair(&mut self, index: usize) {
+        let Screen::Main(state) = &self.screen else {
+            return;
+        };
+        let Some(chat) = state.active_chat() else {
+            return;
+        };
+        self.delete_chat_pair_for(chat.id, index);
+    }
+
+    pub fn delete_chat_pair_for(&mut self, chat_id: Uuid, index: usize) {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if state.pending.is_some() {
+        if state.pending.contains_key(&chat_id) {
             return;
         }
-        let Some(chat) = state.active_chat_mut() else {
+        let Some(chat) = state.chat_mut(chat_id) else {
             return;
         };
         crate::session::message_ops::delete_chat_pair(&mut chat.messages, index);
@@ -737,6 +909,9 @@ impl App {
             chat.context_summary_upto = 0;
         }
         state.pending_confirm = None;
+        let chat_ui = state.chat_ui.entry(chat_id).or_default();
+        chat_ui.editing = None;
+        chat_ui.auth_rejected = false;
         self.persist_open_chats();
     }
 
@@ -780,6 +955,7 @@ impl App {
         let len = state.chats.len() as i32;
         let next = (current as i32 + delta).rem_euclid(len) as usize;
         state.active_chat_id = Some(state.chats[next].id);
+        state.lightbox = None;
         state.focus_input_next_frame = true;
     }
 
@@ -833,9 +1009,13 @@ impl App {
         let Screen::Main(state) = &self.screen else {
             return;
         };
-        if state.temporary_mode {
-            return;
+        #[cfg(test)]
+        if let Some(path) = &self.chat_history_path {
+            storage::save_chats_at(path, &state.chats).expect("test chat history");
+        } else {
+            let _ = storage::save_chats(&state.chats);
         }
+        #[cfg(not(test))]
         let _ = storage::save_chats(&state.chats);
         let db = self.db.clone();
         let chats = state.chats.clone();
@@ -858,16 +1038,16 @@ impl App {
         }
     }
 
-    fn start_chat_stream(&mut self) {
+    fn start_chat_stream(&mut self, chat_id: Uuid) {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if state.pending.is_some() {
+        if state.pending.contains_key(&chat_id) {
             return;
         }
         let recent_keep = state.settings.context_recent_messages.max(1);
         let preview_model = state
-            .active_chat()
+            .chat(chat_id)
             .map(|c| c.model.clone())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let context_length = state
@@ -876,13 +1056,21 @@ impl App {
             .and_then(|m| m.context_length)
             .unwrap_or(crate::session::context_window::DEFAULT_CONTEXT_LENGTH);
 
-        let Some(chat) = state.active_chat_mut() else {
+        let Some(provider) = resolve_provider(state, &preview_model) else {
+            state.chat_ui.entry(chat_id).or_default().retry_hint =
+                Some("Configure a provider for this model before retrying.".into());
+            return;
+        };
+        let chat_ui = state.chat_ui.entry(chat_id).or_default();
+        chat_ui.retry_hint = None;
+        chat_ui.auth_rejected = false;
+        chat_ui.generation = chat_ui.generation.wrapping_add(1);
+        let Some(chat) = state.chat_mut(chat_id) else {
             return;
         };
         if chat.messages.is_empty() {
             return;
         }
-        let chat_id = chat.id;
         let model = chat.model.clone();
         let system = chat.request_system();
 
@@ -919,6 +1107,7 @@ impl App {
         chat.context_occupancy = Some(fitted.occupancy);
         let history = fitted.messages;
 
+        let assistant_index = chat.messages.len();
         chat.messages.push(Message {
             role: Role::Assistant,
             content: String::new(),
@@ -927,21 +1116,18 @@ impl App {
             images: Vec::new(),
         });
 
-        if !state.temporary_mode {
-            let _ = storage::save_chats(&state.chats);
-        }
-
         let (tx, rx) = mpsc::channel::<StreamUiEvent>();
         let cancel = CancellationToken::new();
-        state.pending = Some(PendingResponse {
+        state.pending.insert(
             chat_id,
-            rx,
-            cancel: cancel.clone(),
-        });
+            PendingResponse {
+                assistant_index,
+                rx,
+                cancel: cancel.clone(),
+            },
+        );
 
-        let Some(provider) = resolve_provider(state, &model) else {
-            return;
-        };
+        self.persist_open_chats();
         self.rt.spawn(async move {
             let request = ChatRequest {
                 model,
@@ -952,10 +1138,22 @@ impl App {
                 max_output_tokens: None,
                 system_cache_chars: 0,
             };
-            let mut stream = match provider.stream_chat(request, cancel.clone()).await {
+            let connection = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let _ = tx.send(StreamUiEvent::Cancelled);
+                    return;
+                }
+                result = provider.stream_chat(request, cancel.clone()) => result,
+            };
+            let mut stream = match connection {
                 Ok(stream) => stream,
                 Err(ProviderError::Unauthorized) => {
                     let _ = tx.send(StreamUiEvent::Unauthorized);
+                    return;
+                }
+                Err(ProviderError::Cancelled) => {
+                    let _ = tx.send(StreamUiEvent::Cancelled);
                     return;
                 }
                 Err(e) => {
@@ -965,6 +1163,7 @@ impl App {
             };
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => {
                         let _ = tx.send(StreamUiEvent::Cancelled);
                         return;
@@ -1007,7 +1206,7 @@ impl App {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if let Some(pending) = &state.pending {
+        if let Some(pending) = state.active_chat().and_then(|c| state.pending.get(&c.id)) {
             pending.cancel.cancel();
         }
     }
@@ -1134,19 +1333,12 @@ impl App {
                     }
                     return;
                 }
-                let retry = if let Screen::Main(state) = &mut self.screen {
+                if let Screen::Main(state) = &mut self.screen {
                     state.settings_ui.test_status = KeyTestStatus::Ok;
                     state.settings_ui.key_input.clear();
                     state.banner_key_input.clear();
-                    let retry = state.retry_after_auth;
-                    state.retry_after_auth = false;
-                    retry
-                } else {
-                    false
-                };
-                if retry {
-                    self.retry_after_auth_fix();
                 }
+                self.retry_after_auth_fix();
             }
             (ValidationResult::Err(msg), testing_stored) => {
                 if let Screen::Main(state) = &mut self.screen {
@@ -1202,137 +1394,74 @@ impl App {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
+        if matches!(state.settings_ui.test_status, KeyTestStatus::Testing) {
+            return;
+        }
         if !state.banner_key_input.trim().is_empty() {
             state.settings_ui.key_input = state.banner_key_input.clone();
         }
-        state.retry_after_auth = true;
+        // Capture the origin before asynchronous key validation or navigation.
+        state.retry_after_auth = state.auth_retry_target();
         self.start_key_test();
     }
 
     pub fn retry_after_auth_fix(&mut self) {
-        let mode = match &self.screen {
-            Screen::Main(state) => state.mode,
-            _ => return,
-        };
-        match mode {
-            AppMode::Chat => self.resend_chat_after_auth(),
-            AppMode::Coder => self.resume_coder_after_auth(),
-        }
-    }
-
-    fn resend_chat_after_auth(&mut self) {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        if state.pending.is_some() {
-            return;
-        }
-        let Some(chat) = state.active_chat_mut() else {
+        let Some(target) = state.retry_after_auth.take() else {
             return;
         };
-        if chat
-            .messages
-            .last()
-            .is_some_and(|m| matches!(m.role, Role::Assistant) && m.content == AUTH_REJECTED_NOTICE)
-        {
-            chat.messages.pop();
-        }
-        let chat_id = chat.id;
-        let model = chat.model.clone();
-        let system = chat.request_system();
-        let history: Vec<ChatMessage> = chat
-            .messages
-            .iter()
-            .map(|m| match m.role {
-                Role::User => ChatMessage::User {
-                    content: m.content.clone(),
-                    images: m.images.clone(),
-                },
-                Role::Assistant => ChatMessage::Assistant {
-                    content: m.content.clone(),
-                    tool_calls: Vec::new(),
-                },
-            })
-            .collect();
-        if history.is_empty() {
-            return;
-        }
-        chat.messages.push(Message {
-            role: Role::Assistant,
-            content: String::new(),
-            appeared_at: Some(Instant::now()),
-            interrupted: false,
-            images: Vec::new(),
-        });
-        let Some(provider) = resolve_provider(state, &model) else {
-            return;
-        };
-        let (tx, rx) = mpsc::channel::<StreamUiEvent>();
-        let cancel = CancellationToken::new();
-        state.pending = Some(PendingResponse {
-            chat_id,
-            rx,
-            cancel: cancel.clone(),
-        });
-        self.rt.spawn(async move {
-            let request = ChatRequest {
-                model,
-                system,
-                messages: history,
-                tools: Vec::new(),
-                temperature: None,
-                max_output_tokens: None,
-                system_cache_chars: 0,
-            };
-            let mut stream = match provider.stream_chat(request, cancel.clone()).await {
-                Ok(stream) => stream,
-                Err(ProviderError::Unauthorized) => {
-                    let _ = tx.send(StreamUiEvent::Unauthorized);
+        match target {
+            AuthRetryTarget::Chat {
+                chat_id,
+                generation,
+            } => {
+                if state.pending.contains_key(&chat_id)
+                    || !state
+                        .chat_ui
+                        .get(&chat_id)
+                        .is_some_and(|s| s.auth_rejected && s.generation == generation)
+                {
                     return;
                 }
-                Err(e) => {
-                    let _ = tx.send(StreamUiEvent::Error(format!("{e}")));
+                let Some(chat) = state.chat(chat_id) else {
+                    return;
+                };
+                if resolve_provider(state, &chat.model).is_none() {
                     return;
                 }
-            };
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        let _ = tx.send(StreamUiEvent::Cancelled);
-                        return;
-                    }
-                    event = stream.next() => {
-                        match event {
-                            Some(Ok(ProviderEvent::TextDelta(text))) => {
-                                if tx.send(StreamUiEvent::Delta(text)).is_err() {
-                                    return;
-                                }
-                            }
-                            Some(Ok(ProviderEvent::Usage(_) | ProviderEvent::ToolCallDelta { .. })) => {}
-                            Some(Ok(ProviderEvent::Retrying { attempt, max_attempts, wait_secs })) => {
-                                let _ = tx.send(StreamUiEvent::Retrying { attempt, max_attempts, wait_secs });
-                            }
-                            Some(Ok(ProviderEvent::Finished(_))) | None => {
-                                let _ = tx.send(StreamUiEvent::Done);
-                                return;
-                            }
-                            Some(Err(ProviderError::Cancelled)) => {
-                                let _ = tx.send(StreamUiEvent::Cancelled);
-                                return;
-                            }
-                            Some(Err(ProviderError::Unauthorized)) => {
-                                let _ = tx.send(StreamUiEvent::Unauthorized);
-                                return;
-                            }
-                            Some(Err(e)) => {
-                                let _ = tx.send(StreamUiEvent::Error(format!("{e}")));
-                                return;
-                            }
-                        }
-                    }
+                let Some(chat) = state.chat_mut(chat_id) else {
+                    return;
+                };
+                if !chat.messages.last().is_some_and(|m| {
+                    matches!(m.role, Role::Assistant) && m.content == AUTH_REJECTED_NOTICE
+                }) {
+                    return;
+                }
+                chat.messages.pop();
+                self.start_chat_stream(chat_id);
+            }
+            AuthRetryTarget::Coder(id) => {
+                // The existing Coder resume method operates on the selected session.
+                // Select its captured origin only for dispatch, then restore navigation.
+                let previous = state.coder.sessions.active;
+                let Some(index) = state
+                    .coder
+                    .sessions
+                    .sessions
+                    .iter()
+                    .position(|s| s.id == id)
+                else {
+                    return;
+                };
+                state.coder.sessions.active = index;
+                self.resume_coder_after_auth();
+                if let Screen::Main(state) = &mut self.screen {
+                    state.coder.sessions.active = previous;
                 }
             }
-        });
+        }
     }
 
     pub fn rebuild_provider_timeout(&mut self, timeout_secs: u64) {
@@ -1351,94 +1480,110 @@ impl App {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        let Some(pending) = &state.pending else {
-            return;
-        };
-        let chat_id = pending.chat_id;
-        let mut events = Vec::new();
-        while let Ok(event) = pending.rx.try_recv() {
-            events.push(event);
-        }
-        if events.is_empty() {
-            return;
-        }
-
-        let mut finished = false;
+        let ids: Vec<_> = state.pending.keys().copied().collect();
         let mut persist = false;
-        let mut unauthorized = false;
-        let mut retry_hint = None;
-        for event in events {
-            let target = if state.temporary_mode {
-                state.temp_chat.as_mut().filter(|c| c.id == chat_id)
-            } else {
-                state.chats.iter_mut().find(|c| c.id == chat_id)
-            };
-            let Some(chat) = target else {
-                continue;
-            };
-            let Some(last) = chat.messages.last_mut() else {
-                continue;
-            };
-            if !matches!(last.role, Role::Assistant) {
+        for chat_id in ids {
+            if state.chat(chat_id).is_none() {
+                state.dispose_chat(chat_id);
                 continue;
             }
-            match event {
-                StreamUiEvent::Delta(text) => last.content.push_str(&text),
-                StreamUiEvent::Done => {
-                    finished = true;
-                    persist = true;
-                }
-                StreamUiEvent::Error(e) => {
-                    if last.content.is_empty() {
-                        last.content = format!("⚠ Error: {e}");
-                    } else {
-                        last.content.push_str(&format!("\n\n⚠ Error: {e}"));
+            let Some(pending) = state.pending.get(&chat_id) else {
+                continue;
+            };
+            let assistant_index = pending.assistant_index;
+            let mut events = Vec::new();
+            // Give every chat a chance to advance without monopolizing the UI frame.
+            for _ in 0..256 {
+                match pending.rx.try_recv() {
+                    Ok(event) => {
+                        let terminal = matches!(
+                            event,
+                            StreamUiEvent::Done
+                                | StreamUiEvent::Cancelled
+                                | StreamUiEvent::Error(_)
+                                | StreamUiEvent::Unauthorized
+                        );
+                        events.push(event);
+                        if terminal {
+                            break;
+                        }
                     }
-                    finished = true;
-                    persist = true;
-                }
-                StreamUiEvent::Unauthorized => {
-                    last.content = AUTH_REJECTED_NOTICE.into();
-                    unauthorized = true;
-                    finished = true;
-                    persist = true;
-                }
-                StreamUiEvent::Retrying {
-                    attempt,
-                    max_attempts,
-                    wait_secs,
-                } => {
-                    retry_hint = Some(format!(
-                        "Retrying in {wait_secs}s… ({attempt}/{max_attempts})"
-                    ));
-                }
-                StreamUiEvent::Cancelled => {
-                    last.interrupted = true;
-                    if last.content.is_empty() {
-                        last.content = "*(interrupted)*".into();
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        events.push(StreamUiEvent::Error(
+                            "Response stream disconnected before completion.".into(),
+                        ));
+                        break;
                     }
-                    finished = true;
-                    persist = true;
+                }
+            }
+            for event in events {
+                let Some(last) = state
+                    .chat_mut(chat_id)
+                    .and_then(|c| c.messages.get_mut(assistant_index))
+                    .filter(|m| matches!(m.role, Role::Assistant))
+                else {
+                    state.pending.remove(&chat_id);
+                    state.chat_ui.entry(chat_id).or_default().retry_hint = None;
+                    break;
+                };
+                let mut finished = false;
+                match event {
+                    StreamUiEvent::Delta(text) => last.content.push_str(&text),
+                    StreamUiEvent::Done => finished = true,
+                    StreamUiEvent::Error(e) => {
+                        if !last.content.is_empty() {
+                            last.content.push_str("\n\n");
+                        }
+                        last.content.push_str(&format!("⚠ Error: {e}"));
+                        last.interrupted = true;
+                        finished = true;
+                    }
+                    StreamUiEvent::Unauthorized => {
+                        last.content = AUTH_REJECTED_NOTICE.into();
+                        state.chat_ui.entry(chat_id).or_default().auth_rejected = true;
+                        state.credential.state = CredentialState::Rejected;
+                        finished = true;
+                    }
+                    StreamUiEvent::Retrying {
+                        attempt,
+                        max_attempts,
+                        wait_secs,
+                    } => {
+                        state.chat_ui.entry(chat_id).or_default().retry_hint = Some(format!(
+                            "Retrying in {wait_secs}s… ({attempt}/{max_attempts})"
+                        ));
+                    }
+                    StreamUiEvent::Cancelled => {
+                        last.interrupted = true;
+                        if last.content.is_empty() {
+                            last.content = "*(interrupted)*".into();
+                        }
+                        finished = true;
+                    }
+                }
+                if finished {
+                    state.chat_ui.entry(chat_id).or_default().retry_hint = None;
+                    state.pending.remove(&chat_id);
+                    persist |= state.chats.iter().any(|c| c.id == chat_id);
+                    if state.mode == AppMode::Chat
+                        && !state.settings_ui.open
+                        && state.active_chat().is_some_and(|c| c.id == chat_id)
+                    {
+                        state.focus_input_next_frame = true;
+                    }
+                    break;
                 }
             }
         }
-
-        if unauthorized {
-            state.credential.state = CredentialState::Rejected;
-        }
-        if let Some(hint) = retry_hint {
-            state.retry_hint = Some(hint);
-        }
-        if finished {
-            state.retry_hint = None;
-            state.pending = None;
-            state.focus_input_next_frame = true;
-        }
-        if persist && !state.temporary_mode {
-            let _ = storage::save_chats(&state.chats);
+        if persist {
+            self.persist_open_chats();
         }
     }
 }
+
+#[cfg(test)]
+mod chat_tests;
 
 #[cfg(test)]
 mod tests {
