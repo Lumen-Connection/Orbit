@@ -20,6 +20,17 @@ pub fn hover_bar(
     if !hovered {
         return None;
     }
+    action_bar(ui, can_regenerate, can_edit, enabled)
+}
+
+/// A stable message action row. Chat Mode keeps this row in the layout so the
+/// buttons remain under the pointer while it moves away from the message bubble.
+pub fn action_bar(
+    ui: &mut egui::Ui,
+    can_regenerate: bool,
+    can_edit: bool,
+    enabled: bool,
+) -> Option<HoverAction> {
     let mut action = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -89,4 +100,48 @@ pub fn confirm_discard(
         return Some(false);
     }
     decision
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_action_bar_renders_without_a_bubble_hover() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(320.0, 80.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            assert_eq!(action_bar(ui, true, true, true), None);
+        });
+        // The headless test has no renderer to consume the uploaded font atlas.
+        output.textures_delta.clear();
+        let rendered = format!("{:?}", output.shapes);
+        for label in ["Copy", "Regenerate", "Edit", "Delete"] {
+            assert!(rendered.contains(label), "missing action button: {label}");
+        }
+    }
+
+    #[test]
+    fn hover_bar_still_hides_coder_actions_until_the_bubble_is_hovered() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(320.0, 80.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            assert_eq!(hover_bar(ui, false, true, true, true), None);
+        });
+        output.textures_delta.clear();
+        let rendered = format!("{:?}", output.shapes);
+        assert!(!rendered.contains("Regenerate"));
+    }
 }

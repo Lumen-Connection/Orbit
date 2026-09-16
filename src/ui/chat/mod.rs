@@ -10,17 +10,7 @@ use std::time::Duration;
 
 pub fn render(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
-    app.poll_pending();
-
-    let (
-        temporary_mode,
-        has_pending,
-        active_model,
-        has_fading_message,
-        confirm_eject,
-        active_chat_id,
-        pending_chat_id,
-    ) = {
+    let (temporary_mode, active_model, confirm_eject) = {
         let Screen::Main(state) = &app.screen else {
             return;
         };
@@ -28,30 +18,11 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             .active_chat()
             .map(|c| c.model.clone())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        let has_fading = state
-            .active_chat()
-            .map(|c| {
-                c.messages.iter().any(|m| {
-                    matches!(m.role, Role::Assistant)
-                        && m.appeared_at
-                            .is_some_and(|appeared_at| appeared_at.elapsed() < FADE_DURATION)
-                })
-            })
-            .unwrap_or(false);
-        (
-            state.temporary_mode,
-            state.pending.is_some(),
-            active_model,
-            has_fading,
-            state.confirm_eject,
-            state.active_chat().map(|c| c.id),
-            state.pending.as_ref().map(|p| p.chat_id),
-        )
+        (state.temporary_mode, active_model, state.confirm_eject)
     };
 
     // Streaming inserts an empty assistant bubble immediately.
     let show_thinking = false;
-    let _ = (pending_chat_id, active_chat_id);
 
     // === TOP BAR ===
     let mut new_model_choice: Option<String> = None;
@@ -211,6 +182,21 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     }
 
     // === MAIN CHAT ===
+    // Sidebar and temporary-chat navigation may have changed the selected chat.
+    let (has_pending, has_fading_message) = match &app.screen {
+        Screen::Main(state) => (
+            state.active_chat_pending(),
+            state.active_chat().is_some_and(|chat| {
+                chat.messages.iter().any(|message| {
+                    matches!(message.role, Role::Assistant)
+                        && message
+                            .appeared_at
+                            .is_some_and(|at| at.elapsed() < FADE_DURATION)
+                })
+            }),
+        ),
+        _ => return,
+    };
     let want_focus = if let Screen::Main(state) = &mut app.screen {
         let f = state.focus_input_next_frame;
         state.focus_input_next_frame = false;
@@ -224,7 +210,13 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         let Screen::Main(state) = &mut app.screen else {
             return;
         };
-        action = thread::render(ui, state, has_pending, show_thinking, want_focus);
+        if let Some(chat_id) = state.active_chat().map(|chat| chat.id) {
+            action = ui
+                .push_id(chat_id, |ui| {
+                    thread::render(ui, state, has_pending, show_thinking, want_focus)
+                })
+                .inner;
+        }
     });
 
     match action {
@@ -256,9 +248,14 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                 _ => 1,
             };
             if crate::session::message_ops::needs_confirm(count) {
-                if let Screen::Main(state) = &mut app.screen {
-                    state.pending_confirm =
-                        Some(crate::app::PendingConfirm::DeleteChat { index, count });
+                if let Screen::Main(state) = &mut app.screen
+                    && let Some(chat_id) = state.active_chat().map(|chat| chat.id)
+                {
+                    state.pending_confirm = Some(crate::app::PendingConfirm::DeleteChat {
+                        chat_id,
+                        index,
+                        count,
+                    });
                 }
             } else {
                 app.delete_chat_pair(index);
@@ -269,15 +266,20 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                 && let Some(chat) = state.active_chat()
                 && let Some(msg) = chat.messages.get(index)
             {
-                state.editing_chat = Some(crate::app::MessageEdit {
+                let chat_id = chat.id;
+                let edit = crate::app::MessageEdit {
                     index,
                     draft: msg.content.clone(),
-                });
+                };
+                state.chat_ui.entry(chat_id).or_default().editing = Some(edit);
             }
         }
         thread::ThreadAction::CommitEdit => {
             if let Screen::Main(state) = &app.screen
-                && let Some(edit) = state.editing_chat.clone()
+                && let Some(chat_id) = state.active_chat().map(|chat| chat.id)
+                && let Some(edit) = state
+                    .active_chat_ui()
+                    .and_then(|chat_ui| chat_ui.editing.clone())
             {
                 let discarded = state
                     .active_chat()
@@ -286,6 +288,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                 if crate::session::message_ops::needs_confirm(discarded) {
                     if let Screen::Main(state) = &mut app.screen {
                         state.pending_confirm = Some(crate::app::PendingConfirm::EditResendChat {
+                            chat_id,
                             index: edit.index,
                             text: edit.draft,
                             count: discarded,
@@ -297,8 +300,10 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
             }
         }
         thread::ThreadAction::CancelEdit => {
-            if let Screen::Main(state) = &mut app.screen {
-                state.editing_chat = None;
+            if let Screen::Main(state) = &mut app.screen
+                && let Some(chat_ui) = state.active_chat_ui_mut()
+            {
+                chat_ui.editing = None;
             }
         }
         thread::ThreadAction::Export => {
@@ -320,14 +325,18 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
         && let Some(confirm) = state.pending_confirm.clone()
     {
         match confirm {
-            crate::app::PendingConfirm::DeleteChat { index, count } => {
+            crate::app::PendingConfirm::DeleteChat {
+                chat_id,
+                index,
+                count,
+            } if state.active_chat().is_some_and(|chat| chat.id == chat_id) => {
                 match crate::ui::message_actions::confirm_discard(
                     &ctx,
                     "Delete messages?",
                     &format!("{count} messages will be removed from this chat."),
                     "Delete",
                 ) {
-                    Some(true) => app.delete_chat_pair(index),
+                    Some(true) => app.delete_chat_pair_for(chat_id, index),
                     Some(false) => {
                         if let Screen::Main(state) = &mut app.screen {
                             state.pending_confirm = None;
@@ -336,14 +345,19 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     None => {}
                 }
             }
-            crate::app::PendingConfirm::EditResendChat { index, text, count } => {
+            crate::app::PendingConfirm::EditResendChat {
+                chat_id,
+                index,
+                text,
+                count,
+            } if state.active_chat().is_some_and(|chat| chat.id == chat_id) => {
                 match crate::ui::message_actions::confirm_discard(
                     &ctx,
                     "Resend and discard later messages?",
                     &format!("{count} later messages will be discarded."),
                     "Resend",
                 ) {
-                    Some(true) => app.edit_resend_chat(index, text),
+                    Some(true) => app.edit_resend_chat_for(chat_id, index, text),
                     Some(false) => {
                         if let Screen::Main(state) = &mut app.screen {
                             state.pending_confirm = None;

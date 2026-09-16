@@ -57,6 +57,10 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
     app.poll_validation();
     app.poll_catalog();
     app.poll_key_test();
+    app.poll_pending();
+    if matches!(&app.screen, Screen::Main(state) if !state.pending.is_empty()) {
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
+    }
     if matches!(
         &app.screen,
         Screen::Onboarding(s) if matches!(s.status, OnboardingStatus::Validating)
@@ -131,8 +135,29 @@ fn dispatch_shortcuts(app: &mut App, ctx: &egui::Context) {
         Screen::Main(state) => (
             state.mode,
             state.settings_ui.open,
-            state.pending_confirm.is_some(),
-            state.editing_chat.is_some() || state.editing_coder.is_some(),
+            match (&state.pending_confirm, state.mode) {
+                (
+                    Some(
+                        crate::app::PendingConfirm::DeleteChat { chat_id, .. }
+                        | crate::app::PendingConfirm::EditResendChat { chat_id, .. },
+                    ),
+                    AppMode::Chat,
+                ) => state.active_chat().is_some_and(|chat| chat.id == *chat_id),
+                (
+                    Some(
+                        crate::app::PendingConfirm::DeleteCoder { .. }
+                        | crate::app::PendingConfirm::EditResendCoder { .. },
+                    ),
+                    AppMode::Coder,
+                ) => true,
+                _ => false,
+            },
+            match state.mode {
+                AppMode::Chat => state
+                    .active_chat_ui()
+                    .is_some_and(|chat_ui| chat_ui.editing.is_some()),
+                AppMode::Coder => state.editing_coder.is_some(),
+            },
         ),
         _ => return,
     };
@@ -160,8 +185,14 @@ fn dispatch_shortcuts(app: &mut App, ctx: &egui::Context) {
                 app.close_settings();
             } else if editing {
                 if let Screen::Main(state) = &mut app.screen {
-                    state.editing_chat = None;
-                    state.editing_coder = None;
+                    match mode {
+                        AppMode::Chat => {
+                            if let Some(chat_ui) = state.active_chat_ui_mut() {
+                                chat_ui.editing = None;
+                            }
+                        }
+                        AppMode::Coder => state.editing_coder = None,
+                    }
                 }
             } else {
                 match mode {

@@ -33,10 +33,14 @@ pub fn render(
     show_thinking: bool,
     want_focus: bool,
 ) -> ThreadAction {
+    let Some(chat_id) = state.active_chat().map(|chat| chat.id) else {
+        return ThreadAction::None;
+    };
+    let mut chat_ui = state.chat_ui.remove(&chat_id).unwrap_or_default();
     let mut action = ThreadAction::None;
     let captured = crate::ui::attachments::capture(ui);
-    state.draft_images.extend(captured);
-    crate::ui::attachments::draft_strip(ui, &mut state.draft_images, &mut state.lightbox);
+    chat_ui.draft_images.extend(captured);
+    crate::ui::attachments::draft_strip(ui, &mut chat_ui.draft_images, &mut state.lightbox);
     crate::ui::attachments::lightbox_window(ui.ctx(), &mut state.lightbox);
 
     if render_system_prompt(ui, state) {
@@ -44,7 +48,7 @@ pub fn render(
     }
     let palette = tokens(ui);
     let motion = state.settings.motion;
-    if let Some(hint) = &state.retry_hint {
+    if let Some(hint) = &chat_ui.retry_hint {
         ui.colored_label(palette.warning, hint);
     }
     if let Some(occ) = state.active_chat().and_then(|c| c.context_occupancy) {
@@ -79,18 +83,16 @@ pub fn render(
             .max_rect(messages_rect)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    let mut editing = state.editing_chat.take();
     if let Some(thread_action) = render_messages(
         &mut messages_ui,
         state.active_chat().map(|c| c.messages.as_slice()),
         show_thinking,
         has_pending,
-        editing.as_mut(),
+        chat_ui.editing.as_mut(),
         motion,
     ) {
         action = thread_action;
     }
-    state.editing_chat = editing;
 
     let input_rect = egui::Rect::from_min_size(
         egui::pos2(remaining.min.x, remaining.max.y - input_height),
@@ -112,10 +114,11 @@ pub fn render(
     input_ui.add_space(8.0);
 
     let send_enabled =
-        !has_pending && (!state.input.trim().is_empty() || !state.draft_images.is_empty());
+        !has_pending && (!chat_ui.input.trim().is_empty() || !chat_ui.draft_images.is_empty());
     let send_width = 68.0;
     let text_width = (input_ui.available_width() - send_width - 24.0).max(40.0);
-    let text_edit = egui::TextEdit::multiline(&mut state.input)
+    let text_edit = egui::TextEdit::multiline(&mut chat_ui.input)
+        .id_salt(("chat_composer", chat_id))
         .desired_rows(2)
         .desired_width(text_width)
         .hint_text(if has_pending {
@@ -155,6 +158,7 @@ pub fn render(
         }
     }
 
+    state.chat_ui.insert(chat_id, chat_ui);
     action
 }
 
@@ -357,7 +361,7 @@ fn render_message(
     let mut action = None;
     ui.with_layout(layout, |ui| {
         let max_width = ui.available_width() * 0.75;
-        let inner = crate::ui::theme::panel_toned(
+        crate::ui::theme::panel_toned(
             ui,
             if is_user {
                 crate::ui::theme::Tone::Accent
@@ -404,13 +408,10 @@ fn render_message(
             }
         });
 
-        if let Some(hover) = message_actions::hover_bar(
-            ui,
-            inner.response.hovered(),
-            can_regenerate,
-            can_edit,
-            enabled,
-        ) {
+        // Keep the controls in the message row. Rendering them only while the
+        // bubble is hovered removes their hit target before the pointer reaches
+        // them.
+        if let Some(hover) = message_actions::action_bar(ui, can_regenerate, can_edit, enabled) {
             action = Some(match hover {
                 HoverAction::Copy => ThreadAction::Copy(msg.content.clone()),
                 HoverAction::Regenerate => ThreadAction::Regenerate,

@@ -128,7 +128,7 @@ pub fn save_chats(chats: &[Chat]) -> Result<()> {
     save_chats_at(&path, chats)
 }
 
-fn save_chats_at(path: &Path, chats: &[Chat]) -> Result<()> {
+pub(crate) fn save_chats_at(path: &Path, chats: &[Chat]) -> Result<()> {
     let json = serde_json::to_vec_pretty(chats)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
