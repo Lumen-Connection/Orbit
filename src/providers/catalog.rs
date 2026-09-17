@@ -24,7 +24,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 id: "openai/gpt-6-astra",
                 name: "GPT-6 Astra",
                 descriptor: "Ultra agentic super reasoning"
-            }
+            },
             ModelEntry {
                 id: "openai/gpt-5.6-sol",
                 name: "GPT-5.6 Sol",
