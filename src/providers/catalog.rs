@@ -21,14 +21,19 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "OpenAI",
         models: &[
             ModelEntry {
+                id: "openai/gpt-6-astra",
+                name: "GPT-6 Astra",
+                descriptor: "Ultra agentic super reasoning",
+            },
+            ModelEntry {
                 id: "openai/gpt-5.6-sol",
                 name: "GPT-5.6 Sol",
-                descriptor: "SOTA reasoning",
+                descriptor: "State-of-the-art reasoning",
             },
             ModelEntry {
                 id: "openai/gpt-5.6-terra",
                 name: "GPT-5.6 Terra",
-                descriptor: "Opus-level thinking",
+                descriptor: "Balanced, cheap thinking",
             },
             ModelEntry {
                 id: "openai/gpt-5.6-luna",
@@ -41,19 +46,19 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "Google",
         models: &[
             ModelEntry {
-                id: "google/gemini-3.1-pro-preview",
-                name: "Gemini 3.1 Pro",
-                descriptor: "Deep thinking",
-            },
-            ModelEntry {
                 id: "google/gemini-3.8-flash",
                 name: "Gemini 3.8 Flash",
-                descriptor: "Latest Google model",
+                descriptor: "Google's latest fast model",
             },
             ModelEntry {
                 id: "google/gemini-3.5-flash-lite",
                 name: "Gemini 3.5 Flash-Lite",
                 descriptor: "Cheap, quick thinker",
+            },
+            ModelEntry {
+                id: "google/gemini-3.1-pro-preview",
+                name: "Gemini 3.1 Pro",
+                descriptor: "Legacy large model",
             },
         ],
     },
@@ -121,7 +126,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "Alibaba",
         models: &[
             ModelEntry {
-                id: "qwen/qwen3.8-max",
+                id: "qwen/qwen3.8-max-0902",
                 name: "Qwen3.8-Max",
                 descriptor: "Extreme thinking model",
             },
@@ -141,19 +146,19 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "DeepSeek",
         models: &[
             ModelEntry {
+                id: "deepseek/deepseek-v4.1-flash",
+                name: "DeepSeek V4.1 Flash",
+                descriptor: "DeepSeek's latest model",
+            },
+            ModelEntry {
                 id: "deepseek/deepseek-v4-pro-0813",
                 name: "DeepSeek V4 Pro",
-                descriptor: "DeepSeek's latest advanced model",
+                descriptor: "DeepSeek's previous Pro model",
             },
             ModelEntry {
                 id: "deepseek/deepseek-v4-flash-0731",
                 name: "DeepSeek V4 Flash",
-                descriptor: "DeepSeek's latest fast model",
-            },
-            ModelEntry {
-                id: "deepseek/deepseek-v3.2",
-                name: "DeepSeek V3.2",
-                descriptor: "DeepSeek's legacy model",
+                descriptor: "DeepSeek's legacy Flash model",
             },
         ],
     },
@@ -241,8 +246,8 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "Coding",
         models: &[
             ModelEntry {
-                id: "openai/gpt-5.6-sol-pro",
-                name: "GPT-5.6 Sol Pro",
+                id: "openai/gpt-6-astra-pro",
+                name: "GPT-6 Astra Pro",
                 descriptor: "Extreme cost, ultra intelligent OpenAI model",
             },
             ModelEntry {
@@ -266,14 +271,34 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
                 descriptor: "OpenAI's legacy chat model",
             },
             ModelEntry {
-                id: "google/gemini-2.5-pro",
-                name: "Gemini 2.5 Pro",
-                descriptor: "Google's legacy Pro model",
+                id: "openai/gpt-5.5",
+                name: "GPT-5.5",
+                descriptor: "OpenAI's previous reasoning model",
             },
             ModelEntry {
                 id: "x-ai/grok-4.20-multi-agent",
                 name: "Grok 4.20 Multi-Agent",
                 descriptor: "SpaceXAI's older multi-agent orchestrator",
+            },
+        ],
+    },
+    ModelGroup {
+        provider: "Free (Unstable)",
+        models: &[
+            ModelEntry {
+                id: "qwen/qwen3.8-27b:free",
+                name: "Qwen3.8-27B",
+                descriptor: "Alibaba's superdense reasoning model",
+            },
+            ModelEntry {
+                id: "z-ai/glm-5.2:free",
+                name: "GLM-5.2",
+                descriptor: "Z.ai's previous reasoning model",
+            },
+            ModelEntry {
+                id: "nvidia/nemotron-3.5-lightning:free",
+                name: "Nemotron 3.5 Lightning",
+                descriptor: "NVIDIA's ultra-fast chat model",
             },
         ],
     },
