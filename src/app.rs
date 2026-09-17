@@ -1,8 +1,13 @@
 use crate::coder::{AppMode, CoderState};
+use crate::providers::accumulate::AssistantAccumulator;
 use crate::providers::catalog::ModelCatalog;
 use crate::providers::{
     ANTHROPIC, AiProvider, ChatMessage, ChatRequest, OPENAI_COMPAT, OPENROUTER, ProviderError,
     ProviderEvent, ProviderHub, connect_openrouter_timed, validate_openrouter_key,
+};
+use crate::search::{
+    MAX_SEARCHES_PER_TURN, SearchBackend, TAVILY, TavilySearch, WebSource, format_tool_result,
+    hosted_web_search_schema, web_search_schema,
 };
 use crate::secure_store::SecureStore;
 use crate::storage::{self, AppSettings, Db};
@@ -204,6 +209,7 @@ pub enum SettingsTab {
     Mcp,
     Hooks,
     Anthropic,
+    Tavily,
     Local,
     About,
 }
@@ -246,6 +252,23 @@ pub struct Message {
     pub interrupted: bool,
     #[serde(default)]
     pub images: Vec<crate::providers::ImageAttachment>,
+    /// Grounding sources belonging to this assistant response.
+    #[serde(default)]
+    pub sources: Vec<WebSource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ChatSearchMode {
+    #[default]
+    Off,
+    Auto,
+    Tavily,
+}
+
+impl ChatSearchMode {
+    pub const fn enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +290,8 @@ pub struct Chat {
     pub context_occupancy: Option<f32>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub web_search: ChatSearchMode,
 }
 
 impl Chat {
@@ -282,6 +307,7 @@ impl Chat {
             context_summary_upto: 0,
             context_occupancy: None,
             pinned: false,
+            web_search: ChatSearchMode::Off,
         }
     }
 
@@ -308,12 +334,19 @@ pub enum StreamUiEvent {
         max_attempts: u32,
         wait_secs: u64,
     },
+    Sources(Vec<WebSource>),
+    Searching,
 }
 
 pub struct PendingResponse {
     pub assistant_index: usize,
     pub rx: Receiver<StreamUiEvent>,
     pub cancel: CancellationToken,
+}
+
+enum ChatSearchRoute {
+    Hosted,
+    Tavily(TavilySearch),
 }
 
 impl Drop for PendingResponse {
@@ -330,6 +363,7 @@ pub struct ChatUiState {
     pub editing: Option<MessageEdit>,
     pub auth_rejected: bool,
     pub generation: u64,
+    pub search_status: Option<String>,
 }
 
 pub enum AuthRetryTarget {
@@ -802,6 +836,7 @@ impl App {
             appeared_at: Some(Instant::now()),
             interrupted: false,
             images,
+            sources: Vec::new(),
         });
         if chat.title == "New chat" {
             chat.title = text.chars().take(40).collect::<String>();
@@ -1061,6 +1096,38 @@ impl App {
                 Some("Configure a provider for this model before retrying.".into());
             return;
         };
+        let search = if state
+            .chat(chat_id)
+            .is_some_and(|chat| chat.web_search.enabled())
+        {
+            if matches!(provider.id(), OPENROUTER | ANTHROPIC) {
+                Some(ChatSearchRoute::Hosted)
+            } else {
+                if !provider.supports_tools(&preview_model) {
+                    state.chat_ui.entry(chat_id).or_default().retry_hint = Some(
+                        "Web search needs a tool-capable model. Choose another model or turn search off."
+                            .into(),
+                    );
+                    return;
+                }
+                let Some(key) = SecureStore::load_key_for(TAVILY).ok().flatten() else {
+                    state.chat_ui.entry(chat_id).or_default().retry_hint = Some(
+                        "Add a Tavily API key in Settings → Tavily before using web search.".into(),
+                    );
+                    return;
+                };
+                match TavilySearch::new(key) {
+                    Ok(search) => Some(ChatSearchRoute::Tavily(search)),
+                    Err(e) => {
+                        state.chat_ui.entry(chat_id).or_default().retry_hint =
+                            Some(format!("Could not start web search: {e}"));
+                        return;
+                    }
+                }
+            }
+        } else {
+            None
+        };
         let chat_ui = state.chat_ui.entry(chat_id).or_default();
         chat_ui.retry_hint = None;
         chat_ui.auth_rejected = false;
@@ -1114,6 +1181,7 @@ impl App {
             appeared_at: Some(Instant::now()),
             interrupted: false,
             images: Vec::new(),
+            sources: Vec::new(),
         });
 
         let (tx, rx) = mpsc::channel::<StreamUiEvent>();
@@ -1128,78 +1196,9 @@ impl App {
         );
 
         self.persist_open_chats();
-        self.rt.spawn(async move {
-            let request = ChatRequest {
-                model,
-                system,
-                messages: history,
-                tools: Vec::new(),
-                temperature: None,
-                max_output_tokens: None,
-                system_cache_chars: 0,
-            };
-            let connection = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    let _ = tx.send(StreamUiEvent::Cancelled);
-                    return;
-                }
-                result = provider.stream_chat(request, cancel.clone()) => result,
-            };
-            let mut stream = match connection {
-                Ok(stream) => stream,
-                Err(ProviderError::Unauthorized) => {
-                    let _ = tx.send(StreamUiEvent::Unauthorized);
-                    return;
-                }
-                Err(ProviderError::Cancelled) => {
-                    let _ = tx.send(StreamUiEvent::Cancelled);
-                    return;
-                }
-                Err(e) => {
-                    let _ = tx.send(StreamUiEvent::Error(format!("{e}")));
-                    return;
-                }
-            };
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        let _ = tx.send(StreamUiEvent::Cancelled);
-                        return;
-                    }
-                    event = stream.next() => {
-                        match event {
-                            Some(Ok(ProviderEvent::TextDelta(text))) => {
-                                if tx.send(StreamUiEvent::Delta(text)).is_err() {
-                                    return;
-                                }
-                            }
-                            Some(Ok(ProviderEvent::Usage(_) | ProviderEvent::ToolCallDelta { .. })) => {}
-                            Some(Ok(ProviderEvent::Retrying { attempt, max_attempts, wait_secs })) => {
-                                let _ = tx.send(StreamUiEvent::Retrying { attempt, max_attempts, wait_secs });
-                            }
-                            Some(Ok(ProviderEvent::Finished(_))) | None => {
-                                let _ = tx.send(StreamUiEvent::Done);
-                                return;
-                            }
-                            Some(Err(ProviderError::Cancelled)) => {
-                                let _ = tx.send(StreamUiEvent::Cancelled);
-                                return;
-                            }
-                            Some(Err(ProviderError::Unauthorized)) => {
-                                let _ = tx.send(StreamUiEvent::Unauthorized);
-                                return;
-                            }
-                            Some(Err(e)) => {
-                                let _ = tx.send(StreamUiEvent::Error(format!("{e}")));
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        self.rt.spawn(run_chat_turn(
+            provider, model, system, history, search, cancel, tx,
+        ));
     }
 
     pub fn cancel_pending(&mut self) {
@@ -1530,6 +1529,11 @@ impl App {
                 let mut finished = false;
                 match event {
                     StreamUiEvent::Delta(text) => last.content.push_str(&text),
+                    StreamUiEvent::Sources(sources) => last.sources = sources,
+                    StreamUiEvent::Searching => {
+                        state.chat_ui.entry(chat_id).or_default().search_status =
+                            Some("Searching the web…".into());
+                    }
                     StreamUiEvent::Done => finished = true,
                     StreamUiEvent::Error(e) => {
                         if !last.content.is_empty() {
@@ -1564,6 +1568,7 @@ impl App {
                 }
                 if finished {
                     state.chat_ui.entry(chat_id).or_default().retry_hint = None;
+                    state.chat_ui.entry(chat_id).or_default().search_status = None;
                     state.pending.remove(&chat_id);
                     persist |= state.chats.iter().any(|c| c.id == chat_id);
                     if state.mode == AppMode::Chat
@@ -1578,6 +1583,172 @@ impl App {
         }
         if persist {
             self.persist_open_chats();
+        }
+    }
+}
+
+async fn run_chat_turn(
+    provider: Arc<dyn AiProvider>,
+    model: String,
+    system: Option<String>,
+    mut messages: Vec<ChatMessage>,
+    search: Option<ChatSearchRoute>,
+    cancel: CancellationToken,
+    tx: Sender<StreamUiEvent>,
+) {
+    let mut sources = Vec::new();
+    let mut search_calls = 0usize;
+    loop {
+        if cancel.is_cancelled() {
+            let _ = tx.send(StreamUiEvent::Cancelled);
+            return;
+        }
+        let request = ChatRequest {
+            model: model.clone(),
+            system: system.clone(),
+            messages: messages.clone(),
+            tools: match search.as_ref() {
+                Some(ChatSearchRoute::Hosted) => vec![hosted_web_search_schema()],
+                Some(ChatSearchRoute::Tavily(_)) => vec![web_search_schema()],
+                None => Vec::new(),
+            },
+            temperature: None,
+            max_output_tokens: None,
+            system_cache_chars: 0,
+        };
+        let mut stream = match provider.stream_chat(request, cancel.clone()).await {
+            Ok(stream) => stream,
+            Err(ProviderError::Unauthorized) => {
+                let _ = tx.send(StreamUiEvent::Unauthorized);
+                return;
+            }
+            Err(ProviderError::Cancelled) => {
+                let _ = tx.send(StreamUiEvent::Cancelled);
+                return;
+            }
+            Err(error) => {
+                let _ = tx.send(StreamUiEvent::Error(error.to_string()));
+                return;
+            }
+        };
+        let mut accumulator = AssistantAccumulator::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(ProviderEvent::TextDelta(text)) => {
+                    accumulator.push_text(&text);
+                    if tx.send(StreamUiEvent::Delta(text)).is_err() {
+                        return;
+                    }
+                }
+                Ok(ProviderEvent::Retrying {
+                    attempt,
+                    max_attempts,
+                    wait_secs,
+                }) => {
+                    let _ = tx.send(StreamUiEvent::Retrying {
+                        attempt,
+                        max_attempts,
+                        wait_secs,
+                    });
+                }
+                Ok(event) => accumulator.push_event(event),
+                Err(ProviderError::Unauthorized) => {
+                    let _ = tx.send(StreamUiEvent::Unauthorized);
+                    return;
+                }
+                Err(ProviderError::Cancelled) => {
+                    let _ = tx.send(StreamUiEvent::Cancelled);
+                    return;
+                }
+                Err(error) => {
+                    let _ = tx.send(StreamUiEvent::Error(error.to_string()));
+                    return;
+                }
+            }
+        }
+        let assistant = match accumulator.finish() {
+            Ok(assistant) => assistant,
+            Err(error) => {
+                let _ = tx.send(StreamUiEvent::Error(format!(
+                    "Invalid tool call from model: {error}"
+                )));
+                return;
+            }
+        };
+        if !matches!(assistant.finish, crate::providers::FinishReason::ToolCalls) {
+            if !sources.is_empty() {
+                let _ = tx.send(StreamUiEvent::Sources(sources));
+            }
+            let _ = tx.send(StreamUiEvent::Done);
+            return;
+        }
+        let Some(ChatSearchRoute::Tavily(search)) = &search else {
+            let _ = tx.send(StreamUiEvent::Error(
+                "The model requested a tool that Chat Mode does not provide.".into(),
+            ));
+            return;
+        };
+        if assistant.tool_calls.is_empty() || search_calls >= MAX_SEARCHES_PER_TURN {
+            let _ = tx.send(StreamUiEvent::Error(
+                "Web search reached its per-message limit.".into(),
+            ));
+            return;
+        }
+        messages.push(ChatMessage::Assistant {
+            content: assistant.content,
+            tool_calls: assistant.tool_calls.clone(),
+        });
+        for call in assistant.tool_calls {
+            if call.name != "web_search" {
+                let _ = tx.send(StreamUiEvent::Error(
+                    "Chat Mode only permits its web-search tool.".into(),
+                ));
+                return;
+            }
+            let Some(query) = call
+                .arguments
+                .get("query")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|query| !query.is_empty())
+            else {
+                messages.push(ChatMessage::ToolResult {
+                    call_id: call.id,
+                    content: "Search query was missing.".into(),
+                    is_error: true,
+                });
+                continue;
+            };
+            if search_calls >= MAX_SEARCHES_PER_TURN {
+                let _ = tx.send(StreamUiEvent::Error(
+                    "Web search reached its per-message limit.".into(),
+                ));
+                return;
+            }
+            search_calls += 1;
+            let _ = tx.send(StreamUiEvent::Searching);
+            match search.search(query, cancel.clone()).await {
+                Ok(mut found) => {
+                    for source in &mut found {
+                        source.id = format!("S{}", sources.len() + 1);
+                        sources.push(source.clone());
+                    }
+                    messages.push(ChatMessage::ToolResult {
+                        call_id: call.id,
+                        content: format_tool_result(&found),
+                        is_error: false,
+                    });
+                }
+                Err(ProviderError::Cancelled) => {
+                    let _ = tx.send(StreamUiEvent::Cancelled);
+                    return;
+                }
+                Err(error) => messages.push(ChatMessage::ToolResult {
+                    call_id: call.id,
+                    content: format!("Search failed: {error}"),
+                    is_error: true,
+                }),
+            }
         }
     }
 }
@@ -1674,6 +1845,7 @@ mod tests {
             context_summary_upto: 0,
             context_occupancy: None,
             pinned: false,
+            web_search: ChatSearchMode::Off,
         };
         let json = serde_json::to_string(&chat).unwrap();
         let loaded: Chat = serde_json::from_str(&json).unwrap();

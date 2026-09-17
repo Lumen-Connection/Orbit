@@ -58,6 +58,26 @@ pub fn render(
                 .color(palette.text_muted),
         );
     }
+    let mut web_search = state
+        .active_chat()
+        .is_some_and(|chat| chat.web_search.enabled());
+    if ui.toggle_value(&mut web_search, "🌐 Web search").changed()
+        && let Some(chat) = state.active_chat_mut()
+    {
+        chat.web_search = if web_search {
+            crate::app::ChatSearchMode::Auto
+        } else {
+            crate::app::ChatSearchMode::Off
+        };
+        action = ThreadAction::PersistChats;
+    }
+    if let Some(status) = &chat_ui.search_status {
+        ui.label(
+            egui::RichText::new(status)
+                .small()
+                .color(palette.text_muted),
+        );
+    }
     ui.horizontal(|ui| {
         if ui
             .small_button("EXPORT  ↓")
@@ -396,6 +416,19 @@ fn render_message(
                 );
             } else {
                 render_markdown_with_copy(ui, &msg.content, text_color, &mut action);
+                if !msg.sources.is_empty() {
+                    egui::CollapsingHeader::new(format!("Sources ({})", msg.sources.len())).show(
+                        ui,
+                        |ui| {
+                            for source in &msg.sources {
+                                ui.hyperlink_to(
+                                    format!("[{}] {}", source.id, source.title),
+                                    &source.url,
+                                );
+                            }
+                        },
+                    );
+                }
                 if msg.interrupted {
                     ui.add_space(4.0);
                     ui.label(

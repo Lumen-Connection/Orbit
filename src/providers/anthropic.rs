@@ -106,9 +106,17 @@ pub fn encode_request(request: &ChatRequest) -> serde_json::Value {
     if let Some(system) = request.system.as_deref() {
         body["system"] = encode_system(system, request.system_cache_chars);
     }
-    if !request.tools.is_empty() {
-        body["tools"] = request
-            .tools
+    let uses_hosted_search = request
+        .tools
+        .iter()
+        .any(|tool| tool.name == crate::search::HOSTED_WEB_SEARCH_TOOL);
+    let ordinary_tools: Vec<_> = request
+        .tools
+        .iter()
+        .filter(|tool| tool.name != crate::search::HOSTED_WEB_SEARCH_TOOL)
+        .collect();
+    if !ordinary_tools.is_empty() || uses_hosted_search {
+        let mut tools: Vec<serde_json::Value> = ordinary_tools
             .iter()
             .map(|t| {
                 serde_json::json!({
@@ -118,6 +126,14 @@ pub fn encode_request(request: &ChatRequest) -> serde_json::Value {
                 })
             })
             .collect();
+        if uses_hosted_search {
+            tools.push(serde_json::json!({
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 3,
+            }));
+        }
+        body["tools"] = serde_json::Value::Array(tools);
     }
     if let Some(temp) = request.temperature {
         body["temperature"] = serde_json::json!(temp);
@@ -538,6 +554,22 @@ mod tests {
                 .iter()
                 .all(|m| m["role"] != "system")
         );
+    }
+
+    #[test]
+    fn hosted_search_marker_becomes_anthropic_server_tool() {
+        let request = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            system: None,
+            messages: vec![ChatMessage::user("current weather")],
+            tools: vec![crate::search::hosted_web_search_schema()],
+            temperature: None,
+            max_output_tokens: None,
+            system_cache_chars: 0,
+        };
+        let body = encode_request(&request);
+        assert_eq!(body["tools"][0]["type"], "web_search_20250305");
+        assert_eq!(body["tools"][0]["max_uses"], 3);
     }
 
     #[test]

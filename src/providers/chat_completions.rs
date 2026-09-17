@@ -339,7 +339,17 @@ impl ChatCompletionsClient {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<ChatCompletionStream, ChatCompletionsError> {
-        let body = ApiChatRequest {
+        let uses_hosted_search = request
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::search::HOSTED_WEB_SEARCH_TOOL);
+        let ordinary_tools: Vec<_> = request
+            .tools
+            .iter()
+            .filter(|tool| tool.name != crate::search::HOSTED_WEB_SEARCH_TOOL)
+            .cloned()
+            .collect();
+        let mut body = ApiChatRequest {
             model: request.model,
             messages: encode_messages(
                 request.system.as_deref(),
@@ -347,10 +357,16 @@ impl ChatCompletionsClient {
                 &request.messages,
             ),
             stream: true,
-            tools: encode_tools(&request.tools),
+            tools: encode_tools(&ordinary_tools),
             temperature: request.temperature,
             max_tokens: request.max_output_tokens,
         };
+        if uses_hosted_search && self.provider_id == crate::providers::OPENROUTER {
+            body.tools.push(serde_json::json!({
+                "type": "openrouter:web_search",
+                "parameters": { "engine": "auto", "max_uses": 3, "max_results": 5 }
+            }));
+        }
         let req = self
             .http
             .post(format!("{}/chat/completions", self.base_url))

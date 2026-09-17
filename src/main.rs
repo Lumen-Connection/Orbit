@@ -13,6 +13,7 @@ mod media;
 mod pipeline;
 mod providers;
 mod runner;
+mod search;
 mod secure_store;
 mod security;
 mod session;

@@ -372,6 +372,7 @@ mod tests {
             appeared_at: None,
             interrupted: false,
             images: Vec::new(),
+            sources: Vec::new(),
         }
     }
 

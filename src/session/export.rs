@@ -129,6 +129,16 @@ fn format_chat_message(msg: &Message) -> String {
     if msg.interrupted {
         out.push_str("*Interrupted*\n\n");
     }
+    if !msg.sources.is_empty() {
+        out.push_str("### Sources\n\n");
+        for source in &msg.sources {
+            out.push_str(&format!(
+                "- [{}] [{}]({})\n",
+                source.id, source.title, source.url
+            ));
+        }
+        out.push('\n');
+    }
     out
 }
 
@@ -163,6 +173,7 @@ mod tests {
             appeared_at: None,
             interrupted: false,
             images: Vec::new(),
+            sources: Vec::new(),
         });
         chat.messages.push(Message {
             role: Role::Assistant,
@@ -170,6 +181,7 @@ mod tests {
             appeared_at: None,
             interrupted: false,
             images: Vec::new(),
+            sources: Vec::new(),
         });
         let md = chat_to_markdown(&chat);
         assert!(md.starts_with("# Fix login"));
