@@ -1616,7 +1616,15 @@ async fn run_chat_turn(
             max_output_tokens: None,
             system_cache_chars: 0,
         };
-        let mut stream = match provider.stream_chat(request, cancel.clone()).await {
+        let connection = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let _ = tx.send(StreamUiEvent::Cancelled);
+                return;
+            }
+            result = provider.stream_chat(request, cancel.clone()) => result,
+        };
+        let mut stream = match connection {
             Ok(stream) => stream,
             Err(ProviderError::Unauthorized) => {
                 let _ = tx.send(StreamUiEvent::Unauthorized);
@@ -1632,7 +1640,18 @@ async fn run_chat_turn(
             }
         };
         let mut accumulator = AssistantAccumulator::new();
-        while let Some(event) = stream.next().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let _ = tx.send(StreamUiEvent::Cancelled);
+                    return;
+                }
+                event = stream.next() => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
             match event {
                 Ok(ProviderEvent::TextDelta(text)) => {
                     accumulator.push_text(&text);
@@ -1650,6 +1669,10 @@ async fn run_chat_turn(
                         max_attempts,
                         wait_secs,
                     });
+                }
+                Ok(ProviderEvent::Finished(reason)) => {
+                    accumulator.push_event(ProviderEvent::Finished(reason));
+                    break;
                 }
                 Ok(event) => accumulator.push_event(event),
                 Err(ProviderError::Unauthorized) => {
