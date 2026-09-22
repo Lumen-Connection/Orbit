@@ -1758,7 +1758,7 @@ mod chat_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Chat, Role};
+    use super::{Chat, ChatSearchMode, Role};
     use chrono::Utc;
     use uuid::Uuid;
 
