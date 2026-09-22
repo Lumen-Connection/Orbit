@@ -13,7 +13,7 @@ for conversations and a **Coder Mode** for agentic programming.
 ## Features
 
 
-- **Chat Mode** — a simple and extremely lightweight AI chat interface with all SOTA models.
+- **Chat Mode** — a simple and extremely lightweight AI chat interface with all SOTA models. Supports web search through [Tavily](https://www.tavily.com/).
 - **Coder Mode** — a multi-agent, highly programmable AI-first coding environment.
 
 

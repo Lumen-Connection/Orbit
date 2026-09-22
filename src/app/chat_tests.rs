@@ -283,6 +283,7 @@ fn synthetic_pending(f: &mut Fixture, id: Uuid) -> (Sender<StreamUiEvent>, Cance
         appeared_at: None,
         interrupted: false,
         images: vec![],
+        sources: vec![],
     });
     let assistant_index = chat.messages.len() - 1;
     f.state_mut().pending.insert(

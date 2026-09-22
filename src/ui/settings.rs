@@ -28,6 +28,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                     ui.set_width(140.0);
                     tab_button(ui, app, SettingsTab::Credentials, "OpenRouter");
                     tab_button(ui, app, SettingsTab::Anthropic, "Anthropic");
+                    tab_button(ui, app, SettingsTab::Tavily, "Tavily");
                     tab_button(ui, app, SettingsTab::Local, "Local");
                     tab_button(ui, app, SettingsTab::Models, "Models");
                     tab_button(ui, app, SettingsTab::Limits, "Limits");
@@ -41,6 +42,7 @@ pub fn render(app: &mut App, ui: &mut egui::Ui) {
                 ui.vertical(|ui| match current_tab(app) {
                     SettingsTab::Credentials => render_credentials(app, ui),
                     SettingsTab::Anthropic => render_anthropic(app, ui),
+                    SettingsTab::Tavily => render_tavily(app, ui),
                     SettingsTab::Local => render_local(app, ui),
                     SettingsTab::Models => render_models(app, ui),
                     SettingsTab::Limits => render_limits(app, ui),
@@ -196,6 +198,56 @@ fn render_anthropic(app: &mut App, ui: &mut egui::Ui) {
     );
     ui.add_space(10.0);
     render_provider_key_field(app, ui, crate::providers::ANTHROPIC, "sk-ant-…");
+}
+
+fn render_tavily(app: &mut App, ui: &mut egui::Ui) {
+    ui.heading("Tavily web search");
+    ui.add_space(8.0);
+    ui.label("Chat Mode uses this key only when Web search is enabled for a conversation.");
+    ui.label("Tavily may bill searches and receives the model's search queries.");
+    ui.add_space(10.0);
+    let stored = SecureStore::load_key_for(crate::search::TAVILY)
+        .ok()
+        .flatten();
+    let Screen::Main(state) = &mut app.screen else {
+        return;
+    };
+    ui.add(
+        egui::TextEdit::singleline(&mut state.settings_ui.key_input)
+            .password(!state.settings_ui.show_key)
+            .hint_text("tvly-…")
+            .desired_width(f32::INFINITY),
+    );
+    ui.checkbox(&mut state.settings_ui.show_key, "Show typed key");
+    ui.horizontal(|ui| {
+        if ui.button("Save").clicked() {
+            let key = state.settings_ui.key_input.trim().to_string();
+            if key.is_empty() {
+                state.settings_ui.test_status =
+                    KeyTestStatus::Err("Enter a Tavily API key first.".into());
+            } else if let Err(error) = SecureStore::save_key_for(crate::search::TAVILY, &key) {
+                state.settings_ui.test_status = KeyTestStatus::Err(error.to_string());
+            } else {
+                state.settings_ui.key_input.clear();
+                state.settings_ui.test_status = KeyTestStatus::Ok;
+            }
+        }
+        if ui
+            .add_enabled(stored.is_some(), egui::Button::new("Remove"))
+            .clicked()
+        {
+            match SecureStore::delete_key_for(crate::search::TAVILY) {
+                Ok(()) => state.settings_ui.test_status = KeyTestStatus::Idle,
+                Err(error) => state.settings_ui.test_status = KeyTestStatus::Err(error.to_string()),
+            }
+        }
+    });
+    if stored.is_some() {
+        ui.colored_label(crate::ui::theme::tokens(ui).success, "✓ Key configured");
+    }
+    if let KeyTestStatus::Err(error) = &state.settings_ui.test_status {
+        ui.colored_label(crate::ui::theme::tokens(ui).danger, error);
+    }
 }
 
 fn render_local(app: &mut App, ui: &mut egui::Ui) {

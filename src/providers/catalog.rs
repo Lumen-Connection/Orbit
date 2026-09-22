@@ -86,19 +86,14 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "SpaceXAI",
         models: &[
             ModelEntry {
-                id: "x-ai/grok-4.6",
-                name: "Grok 4.6",
+                id: "x-ai/grok-4.7",
+                name: "Grok 4.7",
                 descriptor: "Uncensored superpowered reasoning",
             },
             ModelEntry {
-                id: "x-ai/grok-4.5",
-                name: "Grok 4.5",
+                id: "x-ai/grok-4.6",
+                name: "Grok 4.6",
                 descriptor: "Uncensored advanced reasoning",
-            },
-            ModelEntry {
-                id: "x-ai/grok-build-0.1",
-                name: "Grok Build 0.1",
-                descriptor: "Fast agentic coding model",
             },
         ],
     },
@@ -226,19 +221,14 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
         provider: "Xiaomi",
         models: &[
             ModelEntry {
-                id: "xiaomi/mimo-v2.5-pro",
-                name: "MiMo-V2.5-Pro",
-                descriptor: "Xiaomi's latest advanced model",
+                id: "xiaomi/mimo-v2.6-pro",
+                name: "MiMo-V2.6-Pro",
+                descriptor: "Xiaomi's latest advanced low-cost model",
             },
             ModelEntry {
-                id: "xiaomi/mimo-v2.5",
-                name: "MiMo-V2.5",
-                descriptor: "Xiaomi's latest balanced model",
-            },
-            ModelEntry {
-                id: "xiaomi/mimo-v2-flash",
-                name: "MiMo-V2-Flash",
-                descriptor: "Xiaomi's previous ultra-low cost model",
+                id: "xiaomi/mimo-v2.6-flash",
+                name: "MiMo-V2.6-Flash",
+                descriptor: "Xiaomi's latest fast low-cost model",
             },
         ],
     },
@@ -304,7 +294,7 @@ pub const MODEL_GROUPS: &[ModelGroup] = &[
     },
 ];
 
-pub const DEFAULT_MODEL: &str = "z-ai/glm-5.3-flash";
+pub const DEFAULT_MODEL: &str = "xiaomi/mimo-v2.6-flash";
 
 /// Class used by N3.10 Auto model selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

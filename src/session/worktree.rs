@@ -38,8 +38,10 @@ pub struct Worktree {
 
 impl Worktree {
     pub fn create(project: &Project, session_id: &SessionId) -> Result<Self, String> {
-        let base = crate::storage::data_dir()
-            .ok_or_else(|| "could not resolve the Orbit data directory".to_string())?;
+        // Worktrees are disposable. A constrained environment can lack a platform
+        // data directory (notably in CI), so use the per-user temp directory rather
+        // than making worktree isolation unavailable.
+        let base = crate::storage::data_dir().unwrap_or_else(|| std::env::temp_dir().join("orbit"));
         Self::create_under(&base.join("worktrees"), project, session_id)
     }
 
