@@ -22,7 +22,6 @@ pub struct WebSource {
 
 #[async_trait]
 pub trait SearchBackend: Send + Sync {
-    fn id(&self) -> &'static str;
     async fn search(
         &self,
         query: &str,
@@ -68,10 +67,6 @@ impl TavilySearch {
 
 #[async_trait]
 impl SearchBackend for TavilySearch {
-    fn id(&self) -> &'static str {
-        TAVILY
-    }
-
     async fn search(
         &self,
         query: &str,
